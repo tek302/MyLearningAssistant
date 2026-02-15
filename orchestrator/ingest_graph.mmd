@@ -1,0 +1,14 @@
+graph TD
+    linkStyle default stroke-width:3px
+    Start([fetch])
+    fetch[fetch] -->| | persist[persist]
+    persist[persist] -->| | embed[embed]
+    embed[embed] -->| | summarize_s1[summarize_s1]
+    Start -->| | persist[persist]
+
+    classDef startEnd fill:#90EE90,stroke:#333,stroke-width:2px
+    classDef llmNode fill:#FFB6C1,stroke:#333,stroke-width:2px
+    classDef defaultNode fill:#FFF8DC,stroke:#333,stroke-width:2px
+
+    class Start,End startEnd
+    class embed,fetch,persist,summarize_s1 defaultNode

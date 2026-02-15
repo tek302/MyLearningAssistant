@@ -1,0 +1,97 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Firebase secrets
+*service-account*.json
+firebase-service-account*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+*.log
+
+# Local test artifacts
+body.json
+uvicorn_debug.log
+
+# Android
+android/.gradle/
+android/build/
+android/*/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/.externalNativeBuild/
+android/.cxx/
+android/*.apk
+android/*.aab
+android/*.ap_
+android/*.dex
+android/*.class
+android/bin/
+android/gen/
+android/out/
+android/release/
+android/.DS_Store
+android/captures/
+android/.navigation/
+android/capture/
+android/*.hprof
+
+# Web/Node.js
+web/node_modules/
+web/.next/
+web/out/
+web/build/
+web/dist/
+web/.cache/
+web/.parcel-cache/
+web/.nuxt/
+web/.vuepress/dist/
+web/.serverless/
+web/.env.local
+web/.env.development.local
+web/.env.test.local
+web/.env.production.local
+web/npm-debug.log*
+web/yarn-debug.log*
+web/yarn-error.log*
+web/.pnpm-debug.log*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*~
+

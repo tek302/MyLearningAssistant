@@ -1,0 +1,14 @@
+-- Week5 Day2: PDF worker claim uses sources.meta (no new columns).
+-- Claim: SELECT ... FOR UPDATE SKIP LOCKED one row where status='pending' AND source_type='pdf_url'
+--        and (meta->>'claimed_at' is null or stale); then UPDATE meta with claimed_at, claimed_by.
+-- Example pattern (implemented in app.worker.run_pdf_worker.claim_one_pending_pdf):
+--
+--   SELECT id, url, title, user_id, source_type, status
+--   FROM sources
+--   WHERE status = 'pending' AND source_type = 'pdf_url'
+--     AND (meta IS NULL OR meta->>'claimed_at' IS NULL
+--          OR (meta->>'claimed_at')::timestamptz < now() - '20 minutes'::interval)
+--   ORDER BY created_at LIMIT 1
+--   FOR UPDATE SKIP LOCKED;
+--
+--   UPDATE sources SET meta = jsonb_set(jsonb_set(COALESCE(meta,'{}'), '{claimed_at}', to_jsonb(now()::text)), '{claimed_by}', to_jsonb('pdf_worker')) WHERE id = $1;

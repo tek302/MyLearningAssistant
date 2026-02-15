@@ -1,0 +1,46 @@
+graph TD
+    linkStyle default stroke-width:3px
+    Start([start_run])
+    start_run[start_run] -->| | embed_query[embed_query]
+    embed_query[embed_query] -->| | retrieve_chunks[retrieve_chunks]
+    synthesize_answer[synthesize_answer] -->| | eval_answer[eval_answer]
+    rewrite_query[rewrite_query] -->| | refine_embed_query[refine_embed_query]
+    refine_embed_query[refine_embed_query] -->| | refine_retrieve_chunks[refine_retrieve_chunks]
+    refine_synthesize_answer[refine_synthesize_answer] -->| | refine_eval_answer[refine_eval_answer]
+    retry_synthesize[retry_synthesize] -->| | eval_answer[eval_answer]
+    fallback_answer[fallback_answer] -->| | finalize_run[finalize_run]
+    format_citations[format_citations] -->| | finalize_run[finalize_run]
+    retrieve_chunks[retrieve_chunks] -->|No Results| no_results_finalize[no_results_finalize]
+    retrieve_chunks[retrieve_chunks] -->|Continue| build_context[build_context]
+    build_context[build_context] -->|No Results| no_results_finalize[no_results_finalize]
+    build_context[build_context] -->|Continue| synthesize_answer[synthesize_answer]
+    eval_answer[eval_answer] -->|Pass| check_judge_gate[check_judge_gate]
+    eval_answer[eval_answer] -->|Retry| retry_synthesize[retry_synthesize]
+    eval_answer[eval_answer] -->|Fallback| fallback_answer[fallback_answer]
+    check_judge_gate[check_judge_gate] -->|Judge| judge_answer[judge_answer]
+    check_judge_gate[check_judge_gate] -->|Accept| format_citations[format_citations]
+    judge_answer[judge_answer] -->|Accept| format_citations[format_citations]
+    judge_answer[judge_answer] -->|Refine| refine_plan[refine_plan]
+    refine_plan[refine_plan] -->|Rewrite| rewrite_query[rewrite_query]
+    refine_plan[refine_plan] -->|Skip Rewrite| refine_embed_query[refine_embed_query]
+    refine_plan[refine_plan] -->|Fallback| fallback_answer[fallback_answer]
+    refine_retrieve_chunks[refine_retrieve_chunks] -->|No Results| no_results_finalize[no_results_finalize]
+    refine_retrieve_chunks[refine_retrieve_chunks] -->|Continue| refine_build_context[refine_build_context]
+    refine_build_context[refine_build_context] -->|No Results| no_results_finalize[no_results_finalize]
+    refine_build_context[refine_build_context] -->|Continue| refine_synthesize_answer[refine_synthesize_answer]
+    refine_eval_answer[refine_eval_answer] -->|Pass| refine_check_judge_gate[refine_check_judge_gate]
+    refine_eval_answer[refine_eval_answer] -->|Retry| retry_synthesize[retry_synthesize]
+    refine_eval_answer[refine_eval_answer] -->|Fallback| fallback_answer[fallback_answer]
+    refine_check_judge_gate[refine_check_judge_gate] -->|Judge| refine_judge_answer[refine_judge_answer]
+    refine_check_judge_gate[refine_check_judge_gate] -->|Accept| format_citations[format_citations]
+    refine_judge_answer[refine_judge_answer] -->|Accept| format_citations[format_citations]
+    refine_judge_answer[refine_judge_answer] -->|Fallback| fallback_answer[fallback_answer]
+    Start -->| | embed_query[embed_query]
+
+    classDef startEnd fill:#90EE90,stroke:#333,stroke-width:2px
+    classDef llmNode fill:#FFB6C1,stroke:#333,stroke-width:2px
+    classDef defaultNode fill:#FFF8DC,stroke:#333,stroke-width:2px
+
+    class Start,End startEnd
+    class check_judge_gate,judge_answer,refine_check_judge_gate,refine_judge_answer,refine_synthesize_answer,retry_synthesize,rewrite_query,synthesize_answer llmNode
+    class build_context,embed_query,eval_answer,fallback_answer,finalize_run,format_citations,no_results_finalize,refine_build_context,refine_embed_query,refine_eval_answer,refine_plan,refine_retrieve_chunks,retrieve_chunks,start_run defaultNode
