@@ -95,3 +95,16 @@ Thumbs.db
 *.backup
 *~
 
+# Root-level doc/plan md (keep locally, do not track or push)
+/Learning_Assistant_MVP_v1.0.md
+/Learning_Assistant_MVP_v1.1.md
+/Learning_Assistant_MVP_v1.2.md
+/learning_agent_mvp_v0.2.md
+/learning_agent_mvp_v0.3.md
+/learning_agent_mvp_v0.3.1.md
+/learning_agent_mvp_v0.4.md
+/learning_agent_mvp_v0.5.md
+/mvp_firebase_langchain_supabase_v0.1.md
+/agentic_learning_app.md
+/Cloud_BE_Requirements_v1.0.md
+
