@@ -95,7 +95,8 @@ Thumbs.db
 *.backup
 *~
 
-# Root-level doc/plan md (keep locally, do not track or push)
+# Root-level doc/plan md + pdf (keep locally, do not track or push)
+/Learning_Path_FastAPI_LangGraph_Supabase.pdf
 /Learning_Assistant_MVP_v1.0.md
 /Learning_Assistant_MVP_v1.1.md
 /Learning_Assistant_MVP_v1.2.md
