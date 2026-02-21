@@ -1,63 +1,60 @@
+"""
+FastAPI dependency: get_user_id from Authorization Bearer (Firebase ID token).
+Bypass allowed only when AUTH_BYPASS_USER_ID is set and env is local/dev.
+"""
 import os
 from typing import Annotated
+
 from fastapi import Header, HTTPException, status
-from .firebase_auth import verify_id_token
+
+from .firebase_auth import verify_bearer_token
+
+
+def _is_bypass_allowed() -> bool:
+    """Bypass only in local/dev: AUTH_BYPASS_USER_ID set and (APP_ENV=local or DEBUG=true)."""
+    if not os.getenv("AUTH_BYPASS_USER_ID"):
+        return False
+    app_env = (os.getenv("APP_ENV") or "").strip().lower()
+    debug = (os.getenv("DEBUG") or "").strip().lower() in ("true", "1", "yes")
+    return app_env == "local" or debug
 
 
 async def get_user_id(
-    authorization: Annotated[str | None, Header()] = None
+    authorization: Annotated[str | None, Header()] = None,
 ) -> str:
     """
-    FastAPI dependency to extract and verify user ID from Authorization bearer token.
-    
-    For testing, set AUTH_BYPASS_USER_ID environment variable to bypass Firebase auth.
-    
-    Args:
-        authorization: Authorization header value (Bearer token)
-        
-    Returns:
-        user_id: User ID from decoded token (uid field) or AUTH_BYPASS_USER_ID
-        
-    Raises:
-        HTTPException: If authorization header is missing or invalid
+    Resolve user from Authorization: Bearer <Firebase ID Token>.
+    Returns firebase_uid (uid from token); DB layer maps to users.id via resolve_user_id.
+    Bypass: only when AUTH_BYPASS_USER_ID is set and APP_ENV=local or DEBUG=true.
     """
-    # Check for auth bypass (for testing only)
-    bypass_user_id = os.getenv("AUTH_BYPASS_USER_ID")
-    if bypass_user_id:
-        return bypass_user_id
-    
+    if _is_bypass_allowed():
+        bypass = (os.getenv("AUTH_BYPASS_USER_ID") or "").strip()
+        if bypass:
+            return bypass
+
     if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header is missing"
+            detail="Authorization header is missing",
         )
-    
-    # Extract bearer token
     parts = authorization.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header format. Expected: Bearer <token>"
+            detail="Invalid authorization format. Expected: Bearer <token>",
         )
-    
-    id_token = parts[1]
-    
+    token = parts[1]
     try:
-        # Verify token and get decoded claims
-        decoded = verify_id_token(id_token)
-        
-        # Extract user ID from uid field
-        user_id = decoded.get("uid")
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token does not contain uid"
-            )
-        
-        return user_id
+        decoded = verify_bearer_token(token)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}"
+            detail="Invalid token",
+        ) from e
+    uid = decoded.get("uid")
+    if not uid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token does not contain uid",
         )
-
+    return str(uid)

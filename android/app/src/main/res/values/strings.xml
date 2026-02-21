@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">TekLearningAgent</string>
+    <!-- Replace with your Firebase Web client ID (Project settings > Your apps > Web app). -->
+    <string name="default_web_client_id" translatable="false">YOUR_WEB_CLIENT_ID.apps.googleusercontent.com</string>
 </resources>

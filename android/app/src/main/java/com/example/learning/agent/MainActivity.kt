@@ -4,12 +4,16 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.rememberNavController
+import com.example.learning.agent.ui.auth.AuthViewModel
 import com.example.learning.agent.ui.navigation.*
+import com.example.learning.agent.ui.screens.signin.SignInScreen
 import com.example.learning.agent.ui.theme.TekLearningAgentTheme
 
 class MainActivity : ComponentActivity() {
@@ -18,15 +22,33 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             TekLearningAgentTheme {
-                MainScreen()
+                RootContent()
             }
         }
     }
 }
 
+@Composable
+private fun RootContent() {
+    val authViewModel: AuthViewModel = viewModel()
+    val authState by authViewModel.authState.collectAsState()
+
+    if (authState.isSignedIn) {
+        MainScreen(
+            onSignOut = authViewModel::signOut,
+            userEmail = authState.userEmail
+        )
+    } else {
+        SignInScreen(viewModel = authViewModel)
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen() {
+fun MainScreen(
+    onSignOut: () -> Unit = {},
+    userEmail: String? = null
+) {
     val navController = rememberNavController()
     val currentRoute = getCurrentRoute(navController)
     
@@ -34,6 +56,21 @@ fun MainScreen() {
     val showBottomNav = currentRoute in bottomNavItems.map { it.route }
 
     Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("Learning Agent")
+                        if (userEmail != null) {
+                            Text(userEmail, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                },
+                actions = {
+                    TextButton(onClick = onSignOut) { Text("Sign out") }
+                }
+            )
+        },
         bottomBar = {
             if (showBottomNav) {
                 NavigationBar {

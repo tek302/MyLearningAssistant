@@ -17,7 +17,7 @@ object IngestRepository {
     private const val TAG = "IngestRepository"
 
     sealed class Result {
-        data class Success(val sourceId: String, val status: String) : Result()
+        data class Success(val jobId: String, val status: String) : Result()
         data class Error(val message: String) : Result()
     }
 
@@ -51,8 +51,8 @@ object IngestRepository {
                 if (response.isSuccessful) {
                     val body = response.body()
                     if (body != null) {
-                        Log.d(TAG, "Ingest success: source_id=${body.source_id} status=${body.status}")
-                        Result.Success(body.source_id, body.status)
+                        Log.d(TAG, "Ingest success: job_id=${body.job_id} status=${body.status}")
+                        Result.Success(body.job_id, body.status)
                     } else {
                         Result.Error("Empty response")
                     }

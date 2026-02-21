@@ -21,7 +21,7 @@ interface IngestApi {
     )
 
     data class IngestResponse(
-        val source_id: String,
+        val job_id: String,
         val status: String
     )
 }
