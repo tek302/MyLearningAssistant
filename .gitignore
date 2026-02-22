@@ -6,6 +6,7 @@
 # Firebase secrets
 *service-account*.json
 firebase-service-account*.json
+orchestrator/firebase_myla_admin.json
 
 # Python
 __pycache__/

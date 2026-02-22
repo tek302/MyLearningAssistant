@@ -1,31 +1,27 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app.config import load_env
 from app.db.pool import close_pool, init_pool
-from app.routers import documents, graph_test, ingest, ingest_status, rag
+from app.routers import documents, graph_test, ingest, ingest_status, rag, worker
+from app.utils.deps import get_user_id
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage pool lifecycle and in-process job runner (Week6)."""
-    import asyncio
-    from app.worker.job_runner import run_forever
+    """Manage pool lifecycle and Firebase Admin init. Job consumption is tick-driven via POST /worker/tick."""
+    from app.utils.firebase_auth import init_firebase
 
     dotenv_path = load_env()
     logger.info("Loaded .env from %s (override=false)", dotenv_path)
+    import asyncio
+    await asyncio.to_thread(init_firebase)
     await asyncio.to_thread(init_pool)
-    task = asyncio.create_task(run_forever())
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
     await asyncio.to_thread(close_pool)
 
 
@@ -37,9 +33,16 @@ app.include_router(ingest.router)
 app.include_router(ingest_status.router)
 app.include_router(rag.router)
 app.include_router(documents.router)
+app.include_router(worker.router)
 
 
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+@app.get("/me")
+async def me(user_id: str = Depends(get_user_id)):
+    """Return current user's firebase_uid (for token check / who-am-i)."""
+    return {"firebase_uid": user_id}
 

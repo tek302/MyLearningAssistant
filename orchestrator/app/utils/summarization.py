@@ -27,6 +27,11 @@ def get_s1_max_chunks() -> int:
         return 8
 
 
+# Feed-friendly: one sentence + 3 key points (configurable)
+S1_TLDR_MAX_CHARS = 150  # One sentence; keep short for Feed card
+S1_BULLETS_COUNT = 3     # Number of key points to show in Feed
+
+
 def create_s1_summary(chunks_text: str, max_retries: int = 2) -> Dict[str, Any]:
     """
     Create S1 summary using OpenAI chat model.
@@ -52,20 +57,24 @@ def create_s1_summary(chunks_text: str, max_retries: int = 2) -> Dict[str, Any]:
     model = get_summary_model()
     client = OpenAI(api_key=api_key)
     
-    # Build prompt
-    prompt = f"""Summarize the following text content. Provide:
-1. A concise TLDR (max 200 characters)
-2. 3-7 key bullet points
-3. Optional tags (max 6, comma-separated keywords)
+    # Build prompt: one sentence + 3 key points for Feed (keep cards short)
+    tldr_max = int(os.getenv("S1_TLDR_MAX_CHARS", str(S1_TLDR_MAX_CHARS)))
+    bullets_count = int(os.getenv("S1_BULLETS_COUNT", str(S1_BULLETS_COUNT)))
+    bullets_count = max(1, min(7, bullets_count))
+    prompt = f"""Summarize the following text in JSON.
+
+1. tldr: ONE short sentence only (max {tldr_max} characters). No multiple sentences.
+2. bullets: Exactly {bullets_count} key points. Each point one short phrase or sentence.
+3. tags: Optional, max 6 comma-separated keywords.
 
 Text content:
 {chunks_text}
 
-Respond in JSON format:
+Respond in JSON only:
 {{
-  "tldr": "brief summary here",
-  "bullets": ["point 1", "point 2", ...],
-  "tags": ["tag1", "tag2", ...]
+  "tldr": "one sentence summary here",
+  "bullets": ["key point 1", "key point 2", "key point 3"],
+  "tags": ["tag1", "tag2"]
 }}"""
     
     # Retry logic
@@ -86,20 +95,20 @@ Respond in JSON format:
             content = response.choices[0].message.content
             result = json.loads(content)
             
-            # Validate and clean result
+            # Validate and clean: one-sentence tldr, fixed number of bullets (Feed-friendly)
+            tldr_max = int(os.getenv("S1_TLDR_MAX_CHARS", str(S1_TLDR_MAX_CHARS)))
+            bullets_count = int(os.getenv("S1_BULLETS_COUNT", str(S1_BULLETS_COUNT)))
+            bullets_count = max(1, min(7, bullets_count))
             tldr = result.get("tldr", "").strip()
-            if len(tldr) > 200:
-                tldr = tldr[:200].strip()
-            
+            if len(tldr) > tldr_max:
+                tldr = tldr[:tldr_max].strip()
             bullets = result.get("bullets", [])
             if not isinstance(bullets, list):
                 bullets = []
-            # Ensure 3-7 bullets
-            bullets = [str(b).strip() for b in bullets if b][:7]
-            if len(bullets) < 3:
-                # If too few, pad with empty strings (will be filtered)
-                bullets = bullets + [""] * (3 - len(bullets))
-            bullets = [b for b in bullets if b][:7]
+            bullets = [str(b).strip() for b in bullets if b][:bullets_count]
+            if len(bullets) < bullets_count:
+                bullets = bullets + [""] * (bullets_count - len(bullets))
+            bullets = [b for b in bullets if b][:bullets_count]
             
             tags = result.get("tags", [])
             if not isinstance(tags, list):

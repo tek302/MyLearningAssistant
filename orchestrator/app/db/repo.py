@@ -404,7 +404,8 @@ class SupabaseRepo:
         query_vec: List[float],
         k: int,
         topic: Optional[str] = None,
-        lang: Optional[str] = None
+        lang: Optional[str] = None,
+        source_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Perform vector similarity search for chunks using pgvector.
@@ -415,6 +416,7 @@ class SupabaseRepo:
             k: Number of results to return (will be clamped to 1-20)
             topic: Optional topic filter (checks sources.meta->>'topic' if exists)
             lang: Optional language filter (checks sources.lang)
+            source_id: Optional document scope; restrict retrieval to this source (sources.id).
             
         Returns:
             List of dictionaries with keys: chunk_id, source_id, chunk_text, chunk_ord,
@@ -478,6 +480,10 @@ class SupabaseRepo:
                     # (best-effort: silently ignore the filter)
                     pass
                 
+                if source_id:
+                    base_query += " AND s.id = %s"
+                    params.append(source_id)
+                
                 # Order by similarity (cosine distance); tie-breaker: prefer early chunks (ord ASC)
                 base_query += """
                 ORDER BY (e.embedding <=> qv.vec) ASC, c.ord ASC
@@ -535,6 +541,34 @@ class SupabaseRepo:
                     if out.get(k) is not None:
                         out[k] = out[k].isoformat()
                 return out
+
+    def claim_one_queued_job(self) -> Optional[str]:
+        """
+        Claim one job with state='queued'; set state='running'.
+        Uses FOR UPDATE SKIP LOCKED for concurrent tick safety.
+        Returns job_id or None if no queued job.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id FROM jobs
+                    WHERE state = 'queued'
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                    """
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                job_id = str(row[0])
+                cur.execute(
+                    "UPDATE jobs SET state = 'running', updated_at = now() WHERE id = %s",
+                    (job_id,),
+                )
+                conn.commit()
+                return job_id
 
     def get_job_for_user(self, user_uuid: str, job_id: str) -> Optional[Dict[str, Any]]:
         """Load job by id and user_id. Returns dict with id, state, progress, source_id, error or None.

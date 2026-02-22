@@ -86,8 +86,9 @@ class RAGService:
         user_id: str,
         query: str,
         top_k: int = 8,
+        document_id: Optional[str] = None,
         topic: Optional[str] = None,
-        lang: Optional[str] = None
+        lang: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Answer a query using RAG.
@@ -96,6 +97,7 @@ class RAGService:
             user_id: User identifier
             query: User query string
             top_k: Number of chunks to retrieve (default: 8)
+            document_id: Optional document scope (source_id); restricts retrieval to this source
             topic: Optional topic filter
             lang: Optional language filter
             
@@ -128,7 +130,8 @@ class RAGService:
                 query_vec=query_vec,
                 k=retrieval_k,
                 topic=topic,
-                lang=lang
+                lang=lang,
+                source_id=document_id,
             )
             
             # Fallback: if contribution query but chunks lack "contribution", retry with " contributions"
@@ -139,7 +142,7 @@ class RAGService:
                     fallback_vecs = create_embeddings([fallback_query], max_retries=2)
                     fallback_vec = self._normalize_embedding(fallback_vecs[0])
                     fallback_chunks = self.repo.search_similar_chunks(
-                        user_id=user_id, query_vec=fallback_vec, k=16, topic=topic, lang=lang
+                        user_id=user_id, query_vec=fallback_vec, k=16, topic=topic, lang=lang, source_id=document_id
                     )
                     by_id = {ch["chunk_id"]: ch for ch in chunks}
                     for ch in fallback_chunks:

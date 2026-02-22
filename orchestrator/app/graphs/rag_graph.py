@@ -68,6 +68,7 @@ class RAGState(TypedDict, total=False):
     user_id: str
     query: str
     top_k: int
+    document_id: Optional[str]  # Optional document scope (source_id); restricts retrieval to this source
     topic: Optional[str]
     lang: Optional[str]
     query_vec: Optional[List[float]]
@@ -388,16 +389,18 @@ def node_retrieve_chunks(state: RAGState) -> RAGState:
             k_to_use = state["top_k"]  # Use clamped value
         topic = state.get("topic")
         lang = state.get("lang")
+        source_id = state.get("document_id")
         
         retrieval_k = _get_retrieval_k(k_to_use, query)
-        logger.info(f"Retrieving top {retrieval_k} chunks for user {user_id}")
+        logger.info(f"Retrieving top {retrieval_k} chunks for user {user_id}" + (f" (source_id={source_id})" if source_id else ""))
         
         chunks = repo.search_similar_chunks(
             user_id=user_id,
             query_vec=query_vec,
             k=retrieval_k,
             topic=topic,
-            lang=lang
+            lang=lang,
+            source_id=source_id,
         )
         
         # Fallback: if contribution query but chunks lack "contribution", retry with " contributions"
@@ -408,7 +411,7 @@ def node_retrieve_chunks(state: RAGState) -> RAGState:
                 fallback_vecs = create_embeddings([fallback_query], max_retries=2)
                 fallback_vec = _normalize_embedding(fallback_vecs[0])
                 fallback_chunks = repo.search_similar_chunks(
-                    user_id=user_id, query_vec=fallback_vec, k=16, topic=topic, lang=lang
+                    user_id=user_id, query_vec=fallback_vec, k=16, topic=topic, lang=lang, source_id=source_id
                 )
                 # Merge by chunk_id, keep best similarity_score
                 by_id: Dict[Any, Dict] = {ch["chunk_id"]: ch for ch in chunks}

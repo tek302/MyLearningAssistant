@@ -1,12 +1,11 @@
 """
-Week6: In-process job runner; one job at a time. Started from FastAPI lifespan.
+Week6: Job runner for tick-driven ingest. process_job() is invoked by POST /worker/tick.
 """
 import asyncio
 import logging
 from typing import Any
 
 from app.db.repo import SupabaseRepo
-from app.worker.job_queue import dequeue
 from app.chains.ingest_graph import ingest_graph, IngestState
 
 logger = logging.getLogger(__name__)
@@ -90,16 +89,3 @@ async def process_job(job_id: str) -> None:
     repo.update_job(job_id, state="failed", error=f"unknown source_type={source_type}")
     repo.update_source(source_id, status="failed", fail_code="UNKNOWN_SOURCE_TYPE")
 
-
-async def run_forever() -> None:
-    """Loop: dequeue job_id, process_job, repeat. One job at a time."""
-    logger.info("job_runner started")
-    while True:
-        try:
-            job_id = await dequeue()
-            await process_job(job_id)
-        except asyncio.CancelledError:
-            logger.info("job_runner cancelled")
-            raise
-        except Exception as e:
-            logger.exception("job_runner error: %s", e)

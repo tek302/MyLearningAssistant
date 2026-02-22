@@ -19,6 +19,9 @@ import androidx.navigation.navArgument
 @Composable
 fun AppNavHost(
     navController: NavHostController,
+    selectedDocumentId: String? = null,
+    selectedDocumentTitle: String? = null,
+    onDocumentSelect: (id: String, title: String?) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     NavHost(
@@ -28,6 +31,8 @@ fun AppNavHost(
     ) {
         composable(Destination.Feed.route) {
             FeedScreen(
+                selectedDocumentId = selectedDocumentId,
+                onDocumentSelect = onDocumentSelect,
                 onCardClick = { id ->
                     navController.navigate(Destination.FeedDetail.createRoute(id))
                 }
@@ -48,7 +53,10 @@ fun AppNavHost(
             )
         }
         composable(Destination.Ask.route) {
-            AskScreen()
+            AskScreen(
+                selectedDocumentId = selectedDocumentId,
+                selectedDocumentTitle = selectedDocumentTitle
+            )
         }
         composable(Destination.Notes.route) {
             NotesScreen()

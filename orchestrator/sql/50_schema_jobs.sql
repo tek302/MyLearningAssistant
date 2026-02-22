@@ -1,9 +1,7 @@
 -- Week6: jobs table for single-process async ingest; sources status standardization
 
--- Optional: ensure sources has updated_at and unique (user_id, url) for upsert
+-- Optional: ensure sources has updated_at
 alter table sources add column if not exists updated_at timestamptz default now();
--- Allow upsert on (user_id, url). Multiple (user_id, NULL) allowed (NULLs distinct in unique index).
-create unique index if not exists idx_sources_user_id_url on sources (user_id, url);
 
 -- jobs: one row per async ingest job
 create table if not exists public.jobs (

@@ -1,9 +1,10 @@
 """RAG router for query answering."""
 
 import os
+import uuid
 from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 from starlette.concurrency import run_in_threadpool
 
@@ -34,8 +35,20 @@ class RAGAnswerRequest(BaseModel):
     """Request model for RAG answer endpoint."""
     query: str = Field(..., min_length=1, max_length=1000, description="User query")
     top_k: int = Field(default=12, ge=1, le=20, description="Number of chunks to retrieve (1-20)")
+    document_id: Optional[str] = Field(default=None, max_length=36, description="Optional document (source) scope; restricts retrieval to this source_id")
     topic: Optional[str] = Field(default=None, max_length=100, description="Optional topic filter")
     lang: Optional[str] = Field(default=None, max_length=10, description="Optional language filter")
+
+    @field_validator("document_id")
+    @classmethod
+    def document_id_must_be_uuid_if_present(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        try:
+            uuid.UUID(v.strip())
+            return v.strip()
+        except ValueError:
+            raise ValueError("document_id must be a valid UUID")
 
 
 class Citation(BaseModel):
@@ -97,6 +110,7 @@ async def answer_query(
                 "user_id": user_id,
                 "query": request.query,
                 "top_k": request.top_k,  # Original requested value (will be clamped in node_start_run)
+                "document_id": request.document_id,
                 "topic": request.topic,
                 "lang": request.lang,
                 "query_vec": None,
@@ -185,22 +199,30 @@ async def answer_query(
                 cannot_answer = bool(final_state.get("cannot_answer", False))
                 citations = [] if cannot_answer else final_state["citations"]
                 
-                # Convert state to response format
-                # meta.top_k = clamped value used by pipeline
-                # meta.requested_top_k = original user-requested value
+                # Build meta
+                meta = {
+                    "impl": "langgraph",
+                    "top_k": final_state["top_k"],
+                    "requested_top_k": final_state["user_requested_top_k"],
+                    "latency_ms": final_state["latency_ms"],
+                    "model": final_state.get("model", ""),
+                    "attempts_used": final_state.get("attempt", 1),
+                    "fallback_used": bool(final_state.get("fallback_used", False)),
+                    "cannot_answer": cannot_answer
+                }
+                if os.getenv("RAG_DEBUG", "").lower() in ("true", "1", "yes"):
+                    ctx = final_state.get("context_text") or ""
+                    meta["debug"] = {
+                        "context_preview": ctx[:800] + ("..." if len(ctx) > 800 else ""),
+                        "context_length": len(ctx),
+                        "num_included_chunks": len(final_state.get("included_chunks", [])),
+                        "eval_passed": final_state.get("eval_passed"),
+                        "eval_reasons": final_state.get("eval_reasons", []),
+                    }
                 result = {
                     "answer": final_state["answer"],
-                    "citations": citations,  # Enforce citations policy
-                    "meta": {
-                        "impl": "langgraph",
-                        "top_k": final_state["top_k"],  # Clamped value used by pipeline
-                        "requested_top_k": final_state["user_requested_top_k"],  # Original requested value
-                        "latency_ms": final_state["latency_ms"],
-                        "model": final_state.get("model", ""),
-                        "attempts_used": final_state.get("attempt", 1),
-                        "fallback_used": bool(final_state.get("fallback_used", False)),
-                        "cannot_answer": cannot_answer
-                    }
+                    "citations": citations,
+                    "meta": meta
                 }
         else:
             # Fallback to direct service
@@ -209,6 +231,7 @@ async def answer_query(
                 user_id=user_id,
                 query=request.query,
                 top_k=request.top_k,
+                document_id=request.document_id,
                 topic=request.topic,
                 lang=request.lang
             )

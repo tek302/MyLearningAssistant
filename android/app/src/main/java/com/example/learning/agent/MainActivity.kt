@@ -51,7 +51,9 @@ fun MainScreen(
 ) {
     val navController = rememberNavController()
     val currentRoute = getCurrentRoute(navController)
-    
+    var selectedDocumentId by remember { mutableStateOf<String?>(null) }
+    var selectedDocumentTitle by remember { mutableStateOf<String?>(null) }
+
     // Determine if bottom nav should be shown (hide on detail screens)
     val showBottomNav = currentRoute in bottomNavItems.map { it.route }
 
@@ -108,6 +110,12 @@ fun MainScreen(
     ) { paddingValues ->
         AppNavHost(
             navController = navController,
+            selectedDocumentId = selectedDocumentId,
+            selectedDocumentTitle = selectedDocumentTitle,
+            onDocumentSelect = { id, title ->
+                selectedDocumentId = id
+                selectedDocumentTitle = title
+            },
             modifier = Modifier.padding(paddingValues)
         )
     }

@@ -11,7 +11,9 @@ interface DocumentsApi {
 
     @GET("documents")
     suspend fun getDocuments(
-        @Query("limit") limit: Int = 20
+        @Query("limit") limit: Int = 20,
+        @Query("offset") offset: Int = 0,
+        @Query("include_summary") include_summary: Boolean = false
     ): Response<DocumentsResponse>
 
     data class DocumentsResponse(
@@ -28,6 +30,8 @@ interface DocumentsApi {
         val size_mb: Double?,
         val fail_code: String?,
         val created_at: String?,
-        val updated_at: String?
+        val updated_at: String?,
+        val tldr: String? = null,
+        val bullets: List<String>? = null
     )
 }

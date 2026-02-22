@@ -9,6 +9,7 @@ Uses DB claim via sources.meta (claimed_at, claimed_by). Process at most 1 PDF a
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 import time
@@ -26,7 +27,9 @@ if __name__ == "__main__" and __package__ is None:
 
 from app.config import load_env
 from app.db.pool import close_pool, init_pool, with_connection
+from app.db.repo import SupabaseRepo
 from app.utils.embeddings import create_embeddings
+from app.utils.summarization import create_s1_summary, get_s1_max_chunks, get_summary_model
 
 logger = logging.getLogger("pdf_worker")
 
@@ -50,18 +53,29 @@ FAIL_TOO_LONG = "PDF_TOO_LONG"
 FAIL_NO_TEXT = "PDF_NO_TEXT_LAYER"
 
 
+def _skip_ssl_verify() -> bool:
+    """True only when local/debug and SKIP_SSL_VERIFY is set (for Windows/local testing)."""
+    if (os.getenv("SKIP_SSL_VERIFY") or "").strip().lower() not in ("true", "1", "yes"):
+        return False
+    app_env = (os.getenv("APP_ENV") or "").strip().lower()
+    debug = (os.getenv("DEBUG") or "").strip().lower() in ("true", "1", "yes")
+    return app_env == "local" or debug
+
+
 def fetch_pdf(url: str) -> tuple[bytes, float]:
     """
     Stream PDF from url. Enforce max 30MB and 15s total timeout.
     Returns (pdf_bytes, size_mb). Raises ValueError with fail_code message.
     Note: requests timeout only covers connect/read per chunk; we enforce TOTAL elapsed time.
+    When APP_ENV=local or DEBUG=true and SKIP_SSL_VERIFY=true, SSL verification is disabled (local only).
     """
     headers = {"User-Agent": "LearningAgent-PDFWorker/1.0"}
     buf: list[bytes] = []
     total = 0
     start = time.monotonic()
+    verify = not _skip_ssl_verify()
 
-    with requests.get(url, headers=headers, timeout=FETCH_TIMEOUT_S, stream=True) as r:
+    with requests.get(url, headers=headers, timeout=FETCH_TIMEOUT_S, stream=True, verify=verify) as r:
         r.raise_for_status()
         for chunk in r.iter_content(chunk_size=65536):
             # Total timeout: abort if entire download exceeds 15s (not just per-chunk)
@@ -270,12 +284,50 @@ def _persist_chunks_and_embeddings(source_id: str, chunks_list: list[str]) -> No
                 )
 
 
+def _create_s1_summary_for_source(user_id: str, source_id: str) -> None:
+    """
+    Create S1 summary for the given source and insert into summaries table.
+    Uses same logic as ingest_graph node_summarize_s1. Logs and returns on failure (does not raise).
+    """
+    try:
+        repo = SupabaseRepo()
+        user_id_str = str(user_id)
+        max_chunks = get_s1_max_chunks()
+        chunks = repo.fetch_top_chunks_for_summary(source_id, n=max_chunks)
+        if not chunks:
+            logger.debug("source_id=%s no chunks, skip S1 summary", source_id)
+            return
+        chunks_text = "\n\n---\n\n".join(
+            f"[Chunk {chunk.get('ord', i)}]\n{chunk.get('text', '')}" for i, chunk in enumerate(chunks, start=1)
+        )
+        summary = create_s1_summary(chunks_text, max_retries=2)
+        extra = {
+            "model": get_summary_model(),
+            "chunk_count_used": len(chunks),
+            "worker": WORKER_ID,
+        }
+        if summary.get("tags"):
+            extra["tags"] = summary["tags"]
+        repo.insert_summary_s1(
+            user_id=user_id_str,
+            source_id=source_id,
+            tldr=summary["tldr"],
+            bullets=summary["bullets"],
+            extra=extra,
+        )
+        logger.info("source_id=%s S1 summary created bullets=%s", source_id, len(summary["bullets"]))
+    except Exception as e:
+        logger.warning("source_id=%s S1 summary failed (source still marked ready): %s", source_id, e)
+
+
 def process_one(row: dict[str, Any]) -> bool:
     """
-    Fetch PDF, parse, chunk, embed, persist; mark_ready or mark_failed.
+    Fetch PDF, parse, chunk, embed, persist; create S1 summary; mark_ready or mark_failed.
     Returns True if ready, False if failed. Never raises; logs and marks failed on error.
+    If S1 summary fails, source is still marked ready (summary is best-effort).
     """
     source_id = row["id"]
+    user_id = row.get("user_id")
     url = row.get("url") or ""
     log_ctx = f"source_id={source_id} url={url}"
     try:
@@ -287,6 +339,8 @@ def process_one(row: dict[str, Any]) -> bool:
         char_count = len(text)
         chunks_list = chunk_text(text)
         _persist_chunks_and_embeddings(source_id, chunks_list)
+        if user_id:
+            _create_s1_summary_for_source(str(user_id), source_id)
         mark_ready(source_id, pages=pages, size_mb=size_mb, char_count=char_count, chunks_count=len(chunks_list))
         elapsed = time.perf_counter() - t0
         logger.info("%s ready pages=%s size_mb=%.2f chunks=%s elapsed_s=%.2f", log_ctx, pages, size_mb, len(chunks_list), elapsed)

@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "585267597613",
+    "project_id": "my-learning-assistant-fb",
+    "storage_bucket": "my-learning-assistant-fb.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:585267597613:android:c0a6a62b66a2ab5bc7c3a4",
+        "android_client_info": {
+          "package_name": "com.example.learning.agent"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "585267597613-ol6844a36ildtk2pcelupktlechd4nk4.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.learning.agent",
+            "certificate_hash": "1704016530bc8c109d1d2fb6f5e7f126ff6bd87f"
+          }
+        },
+        {
+          "client_id": "585267597613-9mcus3a5in8cc3o8sf3hpe75bt16kil8.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCGppWQDlzMXLK7RM8DYJXt40UNqPsRgPE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "585267597613-9mcus3a5in8cc3o8sf3hpe75bt16kil8.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

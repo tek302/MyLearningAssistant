@@ -7,7 +7,6 @@ from pydantic import BaseModel
 from ..db.pool import resolve_user_id, with_connection
 from ..db.repo import SupabaseRepo
 from ..utils.deps import get_user_id
-from ..worker.job_queue import enqueue
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -15,7 +14,7 @@ SOURCE_TYPES = ("pdf_url", "url", "text")
 
 
 class IngestEnqueueRequest(BaseModel):
-    """Request for POST /ingest (Week6): enqueue a source for async processing."""
+    """Request for POST /ingest: queue a source for tick-driven async processing."""
     type: Literal["pdf_url", "url", "text"]
     content: str
     title: str | None = None
@@ -65,7 +64,7 @@ async def ingest_enqueue(
     user_id: Annotated[str, Depends(get_user_id)],
 ):
     """
-    Enqueue a source for async ingestion (Week6).
+    Queue a source for async ingestion (tick-driven). Job is processed when POST /worker/tick runs.
     Returns job_id; poll GET /ingest/status?job_id=... for state.
     """
     if request.type not in SOURCE_TYPES:
@@ -89,6 +88,5 @@ async def ingest_enqueue(
     )
     repo = SupabaseRepo()
     job_id = repo.create_job(user_id=user_id, job_type="ingest", source_id=source_id)
-    await enqueue(job_id)
     return IngestEnqueueResponse(job_id=job_id, status="queued")
 
