@@ -1,0 +1,29 @@
+# Dependencies and local env
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Secrets (never in image)
+*service-account*.json
+firebase*admin*.json
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docs/tests (optional: remove if you want tests in image)
+# tests/
+# docs/
+*.md
+
+# Misc
+*.log
+.git/
+.gitignore

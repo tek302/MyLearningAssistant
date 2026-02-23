@@ -65,7 +65,7 @@ Cloud Scheduler (1–2 min)  →  POST /worker/tick
 
 | # | 작업 | 설명 |
 |---|------|------|
-| 3.1 | **Dockerfile** | Python 3.11+ 베이스, `orchestrator` 루트 기준. `pip install -r requirements.txt`, `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]`. |
+| 3.1 | **Dockerfile** | Python 3.12-slim 베이스, `orchestrator` 디렉터리 기준. `pip install -r requirements.txt`, `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]`. |
 | 3.2 | **서비스 구성** | **옵션 A (권장): 서비스 2개** — API 전용 + Worker 전용. Worker는 `/worker/tick`만 노출하는 경량 앱 또는 동일 앱의 다른 URL. **옵션 B:** 서비스 1개 — 동일 URL에 `/worker/tick` 포함, Scheduler가 같은 Cloud Run URL에 POST. |
 | 3.3 | **API 서비스** | min-instances=0, 0.25 vCPU, 512Mi, concurrency 1. 환경변수: OPENAI_API_KEY, DATABASE_URL(또는 SUPABASE_DB_URL), GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase.json. Secret Manager에서 마운트. |
 | 3.4 | **Worker 서비스** (옵션 A) | 동일 이미지, 진입점만 `/worker/tick` 호출용으로 제한하거나, 동일 FastAPI 앱에 `/worker/tick` 두고 Scheduler가 Worker 서비스 URL만 호출. min-instances=0, 동일 리소스. |
@@ -263,10 +263,227 @@ curl "http://localhost:8000/ingest/status?job_id=YOUR_JOB_ID" -H "Authorization:
 
 - [x] Phase 2 코드 반영: claim_one_job, /worker/tick, enqueue 제거, run_forever 제거.
 - [x] 로컬에서 /ingest → DB queued → /worker/tick 한 번 호출로 job 처리 확인.
-- [ ] Dockerfile 빌드 및 로컬에서 `docker run -p 8080:8080` 동작 확인.
+- [x] **3.1 Docker 로컬 확인:** 아래 §9 명령으로 빌드 후 `http://localhost:8080/health` 및 `/worker/tick` 확인.
 - [ ] Cloud Run API 서비스 배포, /health, /me (토큰) 확인.
 - [ ] Cloud Run Worker 서비스 배포(동일 이미지), /worker/tick 수동 호출로 job 소비 확인.
 - [ ] Cloud Scheduler job 생성, 1–2분 후 DB에서 job 완료 여부 확인.
 - [ ] Android API_BASE_URL 변경 후 앱에서 ingest → 문서 목록·RAG E2E 확인.
+
+---
+
+## 9. Phase 3.1 — Docker 로컬 빌드/실행 (한 단계씩)
+
+**전제:** Docker Desktop 등 Docker가 설치되어 있고, `orchestrator/.env`가 있음 (로컬 테스트용).
+
+**1) 이미지 빌드** (orchestrator 디렉터리에서):
+
+```powershell
+cd C:\Users\taekh\AndroidStudioProjects\TekLearningAgent\orchestrator
+docker build -t orchestrator .
+```
+
+**2) 컨테이너 실행** (포트 8080, .env 주입):
+
+```powershell
+docker run -p 8080:8080 --env-file .env orchestrator
+```
+
+**3) 확인:**
+
+- 브라우저 또는 PowerShell: `Invoke-RestMethod -Uri "http://localhost:8080/health"` → `{"status":"healthy"}`
+- `Invoke-RestMethod -Uri "http://localhost:8080/worker/tick" -Method Post` → `{ "status": "ok", "processed": ... }`
+
+**4) 중지:** 컨테이너 실행 중인 터미널에서 `Ctrl+C`.
+
+**5) DB 연결 오류 (IPv6 unreachable):**  
+`Network is unreachable` / `1f16:1cd0:... port 5432` 처럼 **IPv6 주소**로 연결하려다 실패하면, Docker 안에서는 DNS가 IPv4를 안 줄 수 있음. 이때 **IPv4 전용 URL**을 쓰면 됨.
+
+- Windows에서 Supabase DB 호스트의 IPv4 확인:
+  ```powershell
+  nslookup db.프로젝트ref.supabase.co
+  ```
+  또는 풀러 쓰면: `nslookup aws-0-us-east-1.pooler.supabase.com` (호스트는 `.env`의 `SUPABASE_DB_URL`에 있는 주소).
+- **A 레코드(Address)** 에 나온 IP 하나를 복사한 뒤, 기존 URL에서 호스트만 그 IP로 바꾼 문자열을 만듦.  
+  예: `postgresql://postgres.xxx:[password]@기존호스트:5432/postgres` → `postgresql://postgres.xxx:[password]@13.xx.xx.xx:5432/postgres`
+- `.env`에 **한 줄 추가** (기존 `SUPABASE_DB_URL`은 그대로 두고):
+  ```
+  DATABASE_URL_IPV4=postgresql://postgres.xxx:[password]@13.xx.xx.xx:5432/postgres
+  ```
+- 그 다음: `docker run -p 8080:8080 --env-file .env orchestrator` 다시 실행.  
+  앱은 `DATABASE_URL_IPV4`가 있으면 이 URL만 사용하고, 호스트 이름 해석을 하지 않음.
+
+이 단계까지 성공하면 체크리스트의 "Dockerfile 빌드 및 로컬 docker run 동작 확인"을 완료한 뒤, 3.2~3.7(Cloud Run 배포·Scheduler·Android) 순서로 진행하면 됨.
+
+---
+
+## 10. Phase 3.2~3.6 — Cloud Run 배포 (한 단계씩)
+
+**옵션 B(단일 서비스)** 기준: 서비스 1개에 API + `/worker/tick` 모두 두고, Scheduler가 같은 URL의 `/worker/tick`을 호출.
+
+### 10.1 사전 준비
+
+- **GCP 프로젝트** 생성 및 과금(결제) 계정 연결.
+- **gcloud CLI** 설치: https://cloud.google.com/sdk/docs/install  
+  설치 후 `gcloud init` 로 로그인·프로젝트 선택.
+- 아래에서 `PROJECT_ID`, `REGION`(예: us-east1)은 본인 값으로 바꿀 것.
+
+```powershell
+# 프로젝트/리전 변수 (본인 값으로 수정)
+$PROJECT_ID = "your-gcp-project-id"
+$REGION = "us-east1"
+gcloud config set project $PROJECT_ID
+```
+
+### 10.2 API 활성화
+
+```powershell
+gcloud services enable run.googleapis.com
+gcloud services enable artifactregistry.googleapis.com
+gcloud services enable cloudbuild.googleapis.com
+gcloud services enable secretmanager.googleapis.com
+gcloud services enable cloudscheduler.googleapis.com
+```
+
+### 10.3 이미지 빌드 및 푸시 (Cloud Build)
+
+Windows에서 로컬 Docker로 푸시하지 않고, **Cloud Build**로 소스만 보내서 GCP에서 빌드·푸시.
+
+```powershell
+cd C:\Users\taekh\AndroidStudioProjects\TekLearningAgent
+
+# Artifact Registry 저장소 생성 (최초 1회)
+gcloud artifacts repositories create orchestrator --repository-format=docker --location=$REGION
+
+# orchestrator 폴더를 컨텍스트로 빌드 (해당 폴더 안의 Dockerfile 사용)
+gcloud builds submit --tag $REGION-docker.pkg.dev/$PROJECT_ID/orchestrator/orchestrator orchestrator
+```
+
+빌드가 끝나면 이미지가 `$REGION-docker.pkg.dev/$PROJECT_ID/orchestrator/orchestrator` 에 올라감.
+
+### 10.4 시크릿 생성 (Secret Manager)
+
+**모든 비밀(API 키·DB URL·Worker 시크릿)은 반드시 Secret Manager에 등록하고, Cloud Run에서는 시크릿만 참조한다.**
+
+#### 1) Firebase Admin JSON (파일 시크릿)
+
+```powershell
+gcloud secrets create firebase-admin-json --data-file=orchestrator/firebase_myla_admin.json
+```
+
+이미 있으면: `gcloud secrets versions add firebase-admin-json --data-file=orchestrator/firebase_myla_admin.json`
+
+#### 2) WORKER_TICK_SECRET (헤더 시크릿 — Scheduler가 `/worker/tick` 호출 시 사용)
+
+PowerShell에서 값만 파일로 넘기기 (구버전 PowerShell도 동작):
+
+```powershell
+# 원하는 시크릿 문자열로 교체 (예: 랜덤 문자열)
+$secretValue = "your-strong-random-secret-here"
+# 새 줄 없이 파일로 저장 (PowerShell 5.x 호환)
+[System.IO.File]::WriteAllText("$PWD\worker_tick_secret.txt", $secretValue)
+gcloud secrets create worker-tick-secret --data-file=worker_tick_secret.txt
+Remove-Item worker_tick_secret.txt
+```
+
+이미 있으면: `[System.IO.File]::WriteAllText(...)` 후 `gcloud secrets versions add worker-tick-secret --data-file=worker_tick_secret.txt`
+
+#### 3) OPENAI_API_KEY, SUPABASE_DB_URL (반드시 Secret Manager 사용)
+
+- **OPENAI_API_KEY:** OpenAI API 키 문자열.
+- **SUPABASE_DB_URL:** 반드시 **Pooler 연결 문자열**만 사용 (Direct `db.xxx.supabase.co` 아님).  
+  형식 예: `postgresql://postgres.[project-ref]:[password]@aws-0-us-east-1.pooler.supabase.com:5432/postgres` 또는 `aws-1-us-east-2.pooler.supabase.com` 등.
+
+GCP 콘솔에서 생성 권장: **Secret Manager** → **Create Secret** → 이름 `openai-api-key` / `supabase-db-url`, 값에 위 값 입력.
+
+또는 PowerShell로 (값은 본인 것으로 교체). 새 줄 없이 저장하려면 `[System.IO.File]::WriteAllText` 사용.
+
+```powershell
+# OPENAI_API_KEY
+[System.IO.File]::WriteAllText("$PWD\oai.txt", "sk-proj-xxxx")
+gcloud secrets create openai-api-key --data-file=oai.txt
+Remove-Item oai.txt
+
+# SUPABASE_DB_URL — 반드시 pooler 호스트 (aws-x-region.pooler.supabase.com)
+[System.IO.File]::WriteAllText("$PWD\dburl.txt", "postgresql://postgres.xxx:PASSWORD@aws-1-us-east-2.pooler.supabase.com:5432/postgres")
+gcloud secrets create supabase-db-url --data-file=dburl.txt
+Remove-Item dburl.txt
+```
+
+**SUPABASE_URL** 은 DB 연결이 아니라 프로젝트 API 주소(`https://[project-ref].supabase.co`)이므로 시크릿이 아니다. 10.5에서 일반 환경변수로만 넣으면 된다.
+
+### 10.5 Cloud Run 서비스 배포
+
+**비밀은 모두 Secret Manager에서만 가져온다.** 환경변수로 넣는 것은 비밀번호가 아닌 것만(예: `APP_ENV`, `SUPABASE_URL`).
+
+- **SUPABASE_URL:** `https://[project-ref].supabase.co` (REST API 주소). **Direct DB 주소(`db.xxx.supabase.co`)가 아님.**
+- **SUPABASE_DB_URL, OPENAI_API_KEY, WORKER_TICK_SECRET:** 반드시 시크릿 참조(`--set-secrets`).
+
+```powershell
+$IMAGE = "$REGION-docker.pkg.dev/$PROJECT_ID/orchestrator/orchestrator"
+
+# Cloud_BE_Requirements_v1.0 §5: 1 vCPU, 512Mi, concurrency 1, min-instances 0 (Free Tier 내 저트래픽 시 무료)
+gcloud run deploy orchestrator `
+  --image $IMAGE `
+  --region $REGION `
+  --platform managed `
+  --allow-unauthenticated `
+  --port 8080 `
+  --cpu 1 `
+  --memory 512Mi `
+  --concurrency 1 `
+  --min-instances 0 `
+  --max-instances 10 `
+  --set-env-vars "APP_ENV=production,SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co,GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase.json" `
+  --set-secrets "/secrets/firebase.json=firebase-admin-json:latest,WORKER_TICK_SECRET=worker-tick-secret:latest,OPENAI_API_KEY=openai-api-key:latest,SUPABASE_DB_URL=supabase-db-url:latest"
+```
+
+- **SUPABASE_URL:** `YOUR_PROJECT_REF` 를 본인 Supabase 프로젝트 ref로 바꿀 것. (예: `voyoolgvujipuodxxfwl` → `https://voyoolgvujipuodxxfwl.supabase.co`). DB 연결용이 아니라 REST/Auth용 URL이다.
+- **SUPABASE_DB_URL** 시크릿에는 10.4에서 넣은 **Pooler URL**(`aws-x-region.pooler.supabase.com`)만 들어가 있어야 한다. Direct(`db.xxx.supabase.co`) 사용 금지.
+- **CPU/메모리/동시성:** `Cloud_BE_Requirements_v1.0.md` §5 기준 — 1 vCPU, 512Mi, concurrency 1, min-instances 0. 저트래픽(주 2~3회 ingest 등)이면 Free Tier(월 180,000 vCPU초, 200만 요청) 내로 가능.
+- Firebase는 파일로 마운트(`/secrets/firebase.json`), 나머지 세 개는 환경변수로 주입된다.
+- **시크릿 권한:** 배포 시 "Permission denied on secret" 나오면, Cloud Run 서비스 계정에 **Secret Manager Secret Accessor** 부여.  
+  `gcloud projects add-iam-policy-binding PROJECT_ID --member="serviceAccount:PROJECT_NUMBER-compute@developer.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"`
+
+### 10.6 배포 후 확인
+
+배포가 끝나면 **서비스 URL**이 나옴 (예: `https://orchestrator-xxxxx-uc.a.run.app`).
+
+```powershell
+$SERVICE_URL = "https://orchestrator-xxxxx-uc.a.run.app"   # 실제 URL로 교체
+
+# Health
+Invoke-RestMethod -Uri "$SERVICE_URL/health"
+
+# /worker/tick — WORKER_TICK_SECRET 사용 시 반드시 헤더 포함
+Invoke-RestMethod -Uri "$SERVICE_URL/worker/tick" -Method Post -Headers @{ "X-Worker-Tick-Secret" = "여기에-10.4에서-설정한-시크릿-값" }
+```
+
+`/me` 는 Firebase 토큰이 필요하므로, Android 앱이나 Postman으로 Bearer 토큰 넣어서 호출.
+
+### 10.7 Cloud Scheduler (주기적으로 /worker/tick 호출) — WORKER_TICK_SECRET 사용
+
+Scheduler가 1~2분마다 `POST /worker/tick` 호출 시, **헤더 `X-Worker-Tick-Secret`** 에 10.4에서 만든 시크릿과 **동일한 값**을 넣는다.
+
+- **콘솔:** Cloud Scheduler → Create Job → Target type: HTTP → URL: `https://your-service.run.app/worker/tick`, Method: POST  
+  → **Headers** (또는 "Add header"): 이름 `X-Worker-Tick-Secret`, 값에 `worker-tick-secret` 시크릿과 같은 문자열 입력.
+- **gcloud 예시 (값을 직접 넣는 경우):**
+  ```powershell
+  gcloud scheduler jobs create http worker-tick --location=$REGION --schedule="*/2 * * * *" --uri="$SERVICE_URL/worker/tick" --http-method=POST --headers="X-Worker-Tick-Secret=동일한시크릿값"
+  ```
+  시크릿 값을 gcloud에 직접 쓰지 않으려면 콘솔에서 Job을 만들고 Headers에만 입력하면 된다.
+
+### 10.8 체크리스트 갱신
+
+- [x] 10.2 API 활성화
+- [x] 10.3 이미지 빌드·푸시
+- [x] 10.4 Firebase·WORKER_TICK_SECRET·OPENAI_API_KEY·SUPABASE_DB_URL 시크릿 생성
+- [x] 10.5 Cloud Run 배포 (서비스 계정 Secret Accessor 부여 후 deploy)
+- [x] 10.6 /health, /worker/tick 확인
+- [ ] 10.7 Cloud Scheduler job 생성
+- [ ] Android `API_BASE_URL` → Cloud Run URL 변경 후 E2E
+
+Android ↔ Cloud 연동 및 E2E 셋업·테스트는 **`ANDROID_CLOUD_E2E.md`** 참고.
+
+---
 
 이 문서는 `Cloud_BE_Requirements_v1.0.md`와 `ROADMAP_USAGE_AND_CLOUD.md` Session 2를 함께 보면서 Cloud Run 이전 시 참고용으로 쓸 수 있음.

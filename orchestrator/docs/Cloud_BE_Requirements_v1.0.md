@@ -97,8 +97,8 @@ worker/tick:\
 ### Benefits
 
 -   Scale-to-zero
--   0.25 vCPU possible
--   Expected cost: single-digit \~\$5--10/month
+-   1 vCPU (저트래픽 시 Free Tier로 $0 가능)
+-   Expected cost: Free Tier 내면 $0, 초과 시 single-digit \$/월
 -   Acceptable latency (≤ tick interval)
 
 ------------------------------------------------------------------------
@@ -113,10 +113,10 @@ worker/tick:\
 ## Compute (tick-driven)
 
 -   Billing: request-based
--   CPU: 0.25 vCPU
+-   CPU: 1 vCPU (Free Tier 내 저트래픽 사용 시 무료 한도 충분)
 -   Memory: 512Mi
 -   Concurrency: 1
--   Execution: 1st gen
+-   Execution: 2nd gen (기본)
 -   min-instances: 0
 
 ## Secrets

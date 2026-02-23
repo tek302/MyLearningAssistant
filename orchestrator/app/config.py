@@ -1,10 +1,70 @@
 """Configuration module for environment variables."""
 
 import os
+import socket
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 from dotenv import load_dotenv
+
+
+def _force_ipv4_db_url(url: str) -> str:
+    """
+    If the DB URL host is a hostname, resolve it to IPv4 and replace in the URL.
+    Fixes 'Network is unreachable' when Docker (no IPv6) connects to Supabase (often resolves to IPv6).
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        p = urlparse(url)
+        host = p.hostname
+        if not host or _looks_like_ipv4(host):
+            return url
+        port = p.port or 5432
+        ipv4 = _resolve_to_ipv4(host, port)
+        if not ipv4:
+            logger.warning("DB host %r resolved to no IPv4; connection may fail in Docker (IPv6 unreachable)", host)
+            return url
+        # Replace only the host part (after last @) so we don't touch userinfo/password
+        if "@" in p.netloc:
+            userinfo, hostport = p.netloc.rsplit("@", 1)
+            if ":" in hostport:
+                _, port_str = hostport.rsplit(":", 1)
+                new_netloc = f"{userinfo}@{ipv4}:{port_str}"
+            else:
+                new_netloc = f"{userinfo}@{ipv4}"
+        else:
+            if ":" in p.netloc:
+                _, port_str = p.netloc.rsplit(":", 1)
+                new_netloc = f"{ipv4}:{port_str}"
+            else:
+                new_netloc = ipv4
+        out = urlunparse((p.scheme, new_netloc, p.path, p.params, p.query, p.fragment))
+        logger.info("DB URL host forced to IPv4: %s -> %s", host, ipv4)
+        return out
+    except Exception as e:
+        logger.warning("Could not force IPv4 for DB URL: %s", e)
+        return url
+
+
+def _looks_like_ipv4(host: str) -> bool:
+    try:
+        socket.inet_pton(socket.AF_INET, host)
+        return True
+    except OSError:
+        return False
+
+
+def _resolve_to_ipv4(host: str, port: int) -> Optional[str]:
+    """Resolve host to first IPv4 address, or None."""
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+        if infos:
+            return infos[0][4][0]
+    except (socket.gaierror, OSError):
+        pass
+    return None
 
 
 def load_env() -> str:
@@ -16,11 +76,27 @@ def load_env() -> str:
 
 
 def get_database_url() -> str:
-    """Return DATABASE_URL or SUPABASE_DB_URL; raise if unset."""
+    """
+    Return DATABASE_URL or SUPABASE_DB_URL; raise if unset.
+    Host is resolved to IPv4 when possible (for Docker). If DATABASE_URL_IPV4 is set, use it as-is (no resolve).
+    """
+    import logging
+    _log = logging.getLogger(__name__)
+    # Explicit IPv4 URL (e.g. for Docker when in-container DNS returns only IPv6)
+    explicit_ipv4 = os.getenv("DATABASE_URL_IPV4")
+    if explicit_ipv4 and explicit_ipv4.strip():
+        return explicit_ipv4.strip()
     url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
     if not url:
         raise RuntimeError("DATABASE_URL or SUPABASE_DB_URL environment variable is not set")
-    return url
+    url = url.strip()
+    # Log which host we're using (for debugging Docker env)
+    try:
+        host = urlparse(url).hostname or "?"
+        _log.info("DB connection host: %s", host)
+    except Exception:
+        pass
+    return _force_ipv4_db_url(url)
 
 
 def get_judge_enabled() -> bool:
