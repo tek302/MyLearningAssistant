@@ -1,7 +1,10 @@
 package com.example.learning.agent.data.remote
 
 import retrofit2.Response
+import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.POST
+import retrofit2.http.Path
 import retrofit2.http.Query
 
 /**
@@ -15,6 +18,16 @@ interface DocumentsApi {
         @Query("offset") offset: Int = 0,
         @Query("include_summary") include_summary: Boolean = false
     ): Response<DocumentsResponse>
+
+    @DELETE("documents/{document_id}")
+    suspend fun deleteDocument(@Path("document_id") documentId: String): Response<Unit>
+
+    @POST("documents/{document_id}/reprocess")
+    suspend fun reprocessDocument(@Path("document_id") documentId: String): Response<ReprocessResponse>
+
+    data class ReprocessResponse(
+        val job_id: String
+    )
 
     data class DocumentsResponse(
         val documents: List<DocumentItem>

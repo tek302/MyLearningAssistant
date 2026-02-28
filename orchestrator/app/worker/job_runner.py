@@ -45,6 +45,7 @@ async def process_job(job_id: str) -> None:
             "user_id": user_id,
             "source_type": source_type,
             "status": "running",
+            "title": (source.get("title") or "").strip(),
         }
         from app.worker.run_pdf_worker import process_one
 

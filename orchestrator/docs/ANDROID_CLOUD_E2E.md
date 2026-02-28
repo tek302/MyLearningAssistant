@@ -87,10 +87,11 @@ API_BASE_URL=https://orchestrator-xxxxx-ue.a.run.app
 2. 응답에서 `job_id` 수신 확인
 3. (선택) Supabase 대시보드에서 `jobs` 테이블에 해당 `job_id`로 `state='queued'` 또는 `state='running'` / `state='done'` 확인
 
-### 4.3 Worker 처리 (Scheduler 또는 수동)
+### 4.3 Worker 처리 (Scheduler 또는 앱/수동)
 
 - **Cloud Scheduler 사용 시:** 1~2분 이내에 자동으로 `POST /worker/tick` 이 호출되어 job이 처리됨. DB에서 `state='done'` 또는 `failed` 로 바뀌는지 확인.
-- **Scheduler 없이 테스트 시:** 로컬 PowerShell 등에서  
+- **앱에서 수동 처리:** 문서 카드에서 **Process** 버튼 클릭 → `POST /me/trigger-worker` 호출 (Bearer 인증). Scheduler 없이 즉시 처리 가능.
+- **PowerShell 수동 호출:**  
   `Invoke-RestMethod -Uri "https://서비스URL/worker/tick" -Method Post -Headers @{ "X-Worker-Tick-Secret" = "시크릿값" }`  
   로 한 번 호출한 뒤, DB에서 해당 job이 처리되었는지 확인.
 
@@ -98,6 +99,9 @@ API_BASE_URL=https://orchestrator-xxxxx-ue.a.run.app
 
 1. 앱에서 **문서 목록** 화면 열기
 2. 방금 ingest한 소스가 **문서로 보이고**, 상태가 완료로 나오는지 확인
+3. **새로고침:** 상단 새로고침 아이콘 또는 아래로 당기기(pull-to-refresh)로 목록 갱신
+4. **상태 표시:** 각 카드에 Pending / Processing / Done / Failed 칩 표시
+5. **Pending 카드:** Refresh(목록 갱신), Process(수동 worker tick) 버튼으로 즉시 처리 가능
 
 ### 4.5 RAG 질의
 

@@ -46,3 +46,22 @@ async def me(user_id: str = Depends(get_user_id)):
     """Return current user's firebase_uid (for token check / who-am-i)."""
     return {"firebase_uid": user_id}
 
+
+@app.post("/me/trigger-worker")
+async def trigger_worker(user_id: str = Depends(get_user_id)):
+    """
+    Trigger one worker tick (claim and process one queued job).
+    Requires Bearer auth. For manual processing from the app.
+    Returns { "status": "ok", "processed": true|false [, "job_id": "..." ] }.
+    """
+    from app.db.repo import SupabaseRepo
+    from app.worker.job_runner import process_job
+
+    repo = SupabaseRepo()
+    job_id = repo.claim_one_queued_job()
+    if job_id:
+        logger.info("trigger_worker: user=%s claimed job_id=%s", user_id, job_id)
+        await process_job(job_id)
+        return {"status": "ok", "processed": True, "job_id": job_id}
+    return {"status": "ok", "processed": False}
+

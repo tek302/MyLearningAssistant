@@ -15,7 +15,8 @@ interface RagApi {
     data class RagAnswerRequest(
         val query: String,
         val top_k: Int = 8,
-        val document_id: String? = null
+        val document_id: String? = null,
+        val include_citations: Boolean = true
     )
 
     data class RagAnswerResponse(

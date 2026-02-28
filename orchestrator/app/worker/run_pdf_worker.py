@@ -5,15 +5,18 @@ Runnable via: python -m app.worker.run_pdf_worker (from orchestrator dir).
 
 Processes source_type='pdf_url' rows: fetch PDF, parse text, chunk, embed, persist.
 Uses DB claim via sources.meta (claimed_at, claimed_by). Process at most 1 PDF at a time.
+Sets sources.title from arXiv API when URL is arXiv, else from PDF metadata when available.
 """
 from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import sys
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import Any
 
@@ -51,6 +54,55 @@ FAIL_FETCH_TIMEOUT = "FETCH_TIMEOUT"
 FAIL_TOO_LARGE = "PDF_TOO_LARGE"
 FAIL_TOO_LONG = "PDF_TOO_LONG"
 FAIL_NO_TEXT = "PDF_NO_TEXT_LAYER"
+
+# arXiv API (no auth; be polite with rate)
+ARXIV_API_URL = "http://export.arxiv.org/api/query"
+ARXIV_ID_PATTERN = re.compile(
+    r"arxiv\.org/(?:abs|pdf)/([0-9]+\.[0-9]+)(?:v[0-9]+)?(?:\.[a-z]+)?",
+    re.IGNORECASE,
+)
+
+
+def _get_arxiv_id(url: str) -> str | None:
+    """Extract arXiv id from URL (e.g. 2006.16236 from https://arxiv.org/pdf/2006.16236.pdf)."""
+    if not url:
+        return None
+    m = ARXIV_ID_PATTERN.search(url)
+    return m.group(1) if m else None
+
+
+def _fetch_arxiv_title(arxiv_id: str) -> str | None:
+    """Fetch paper title from arXiv API. Returns None on error or missing."""
+    try:
+        r = requests.get(
+            ARXIV_API_URL,
+            params={"id_list": arxiv_id},
+            headers={"User-Agent": "LearningAgent-PDFWorker/1.0"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        root = ET.fromstring(r.content)
+        # Atom feed: {http://www.w3.org/2005/Atom}feed -> entry -> title (first entry is the paper)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        entry = root.find("atom:entry", ns)
+        if entry is None:
+            return None
+        title_el = entry.find("atom:title", ns)
+        if title_el is None or title_el.text is None:
+            return None
+        title = title_el.text.strip().replace("\n", " ")
+        return title if title else None
+    except Exception as e:
+        logger.debug("arXiv title fetch failed for %s: %s", arxiv_id, e)
+        return None
+
+
+def _log_title_fetch_failure(log_ctx: str, url: str, had_arxiv: bool) -> None:
+    """Log when we could not set a title (for debugging and support)."""
+    if had_arxiv:
+        logger.info("%s title not set (arXiv fetch failed or not available)", log_ctx)
+    else:
+        logger.debug("%s title not set (no arXiv ID; PDF metadata missing or empty)", log_ctx)
 
 
 def _skip_ssl_verify() -> bool:
@@ -91,10 +143,11 @@ def fetch_pdf(url: str) -> tuple[bytes, float]:
     return pdf_bytes, size_mb
 
 
-def parse_pdf(pdf_bytes: bytes) -> tuple[str, int]:
+def parse_pdf(pdf_bytes: bytes) -> tuple[str, int, dict[str, Any]]:
     """
-    Extract text and page count using PyMuPDF. Text-layer only.
-    Returns (text, pages). Raises ValueError with fail_code.
+    Extract text, page count, and metadata using PyMuPDF. Text-layer only.
+    Returns (text, pages, metadata_dict). metadata may contain 'title', 'author', etc.
+    Raises ValueError with fail_code.
     """
     try:
         import fitz
@@ -112,7 +165,8 @@ def parse_pdf(pdf_bytes: bytes) -> tuple[str, int]:
         text = "\n\n".join(parts).strip()
         if len(text) < MIN_TEXT_CHARS:
             raise ValueError(FAIL_NO_TEXT)
-        return text, pages
+        meta = dict(doc.metadata) if doc.metadata else {}
+        return text, pages, meta
     finally:
         doc.close()
 
@@ -261,18 +315,24 @@ def mark_failed(source_id: str, fail_code: str) -> None:
             )
 
 
+def _sanitize_text_for_db(s: str) -> str:
+    """Remove NUL bytes; PostgreSQL TEXT does not allow them."""
+    return s.replace("\x00", "") if s else s
+
+
 def _persist_chunks_and_embeddings(source_id: str, chunks_list: list[str]) -> None:
     """Insert chunks (with new uuids), compute embeddings, insert embeddings. Single transaction."""
     if not chunks_list:
         return
-    vectors = create_embeddings(chunks_list, max_retries=2)
-    if len(vectors) != len(chunks_list):
+    chunks_clean = [_sanitize_text_for_db(c) for c in chunks_list]
+    vectors = create_embeddings(chunks_clean, max_retries=2)
+    if len(vectors) != len(chunks_clean):
         raise RuntimeError("embedding count mismatch")
     vector_str = lambda v: "[" + ",".join(str(x) for x in v) + "]"
     with with_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM chunks WHERE source_id = %s", (source_id,))
-            for ord_idx, (text, vec) in enumerate(zip(chunks_list, vectors), start=1):
+            for ord_idx, (text, vec) in enumerate(zip(chunks_clean, vectors), start=1):
                 chunk_id = str(uuid.uuid4())
                 cur.execute(
                     "INSERT INTO chunks (id, source_id, ord, text) VALUES (%s, %s, %s, %s)",
@@ -323,19 +383,44 @@ def _create_s1_summary_for_source(user_id: str, source_id: str) -> None:
 def process_one(row: dict[str, Any]) -> bool:
     """
     Fetch PDF, parse, chunk, embed, persist; create S1 summary; mark_ready or mark_failed.
+    Sets sources.title from arXiv API when URL is arXiv, else from PDF metadata when present.
     Returns True if ready, False if failed. Never raises; logs and marks failed on error.
     If S1 summary fails, source is still marked ready (summary is best-effort).
     """
     source_id = row["id"]
     user_id = row.get("user_id")
     url = row.get("url") or ""
+    existing_title = (row.get("title") or "").strip()
     log_ctx = f"source_id={source_id} url={url}"
+    repo = SupabaseRepo()
     try:
+        # Prefer arXiv title when URL is arXiv and we don't have a title yet
+        if not existing_title:
+            arxiv_id = _get_arxiv_id(url)
+            if arxiv_id:
+                arxiv_title = _fetch_arxiv_title(arxiv_id)
+                if arxiv_title:
+                    repo.update_source(source_id, title=arxiv_title)
+                    existing_title = arxiv_title
+                    logger.info("%s title set from arXiv: %s", log_ctx, arxiv_title[:60])
+
         t0 = time.perf_counter()
         pdf_bytes, size_mb = fetch_pdf(url)
-        pages: int
         text: str
-        text, pages = parse_pdf(pdf_bytes)
+        pages: int
+        meta: dict[str, Any]
+        text, pages, meta = parse_pdf(pdf_bytes)
+
+        # If still no title, try PDF metadata
+        if not existing_title and meta:
+            pdf_title = (meta.get("title") or "").strip()
+            if pdf_title:
+                repo.update_source(source_id, title=pdf_title)
+                logger.info("%s title set from PDF metadata: %s", log_ctx, pdf_title[:60])
+
+        if not existing_title and not (meta and (meta.get("title") or "").strip()):
+            _log_title_fetch_failure(log_ctx, url, had_arxiv=bool(_get_arxiv_id(url)))
+
         char_count = len(text)
         chunks_list = chunk_text(text)
         _persist_chunks_and_embeddings(source_id, chunks_list)

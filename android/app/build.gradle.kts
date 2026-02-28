@@ -20,7 +20,7 @@ android {
 
         // Backend base URL for API calls (Auth header attached only to this host).
         // Emulator: 10.0.2.2; physical device: use your PC IP.
-        buildConfigField("String", "API_BASE_URL", "\"http://10.0.2.2:8000/\"")
+        buildConfigField("String", "API_BASE_URL", "\"https://orchestrator-496938442403.us-east1.run.app/\"")
     }
 
     buildTypes {
@@ -30,7 +30,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            buildConfigField("String", "API_BASE_URL", "\"https://your-backend.example.com/\"")
+            buildConfigField("String", "API_BASE_URL", "\"https://orchestrator-496938442403.us-east1.run.app/\"")
         }
     }
     compileOptions {

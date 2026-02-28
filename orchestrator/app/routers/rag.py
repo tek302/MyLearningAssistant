@@ -38,6 +38,7 @@ class RAGAnswerRequest(BaseModel):
     document_id: Optional[str] = Field(default=None, max_length=36, description="Optional document (source) scope; restricts retrieval to this source_id")
     topic: Optional[str] = Field(default=None, max_length=100, description="Optional topic filter")
     lang: Optional[str] = Field(default=None, max_length=10, description="Optional language filter")
+    include_citations: bool = Field(default=True, description="If False, response citations list is empty (saves payload)")
 
     @field_validator("document_id")
     @classmethod
@@ -197,7 +198,7 @@ async def answer_query(
             else:
                 # Extract cannot_answer and enforce citations policy as final safety net
                 cannot_answer = bool(final_state.get("cannot_answer", False))
-                citations = [] if cannot_answer else final_state["citations"]
+                citations = [] if (cannot_answer or not request.include_citations) else final_state["citations"]
                 
                 # Build meta
                 meta = {
@@ -247,8 +248,8 @@ async def answer_query(
                 ("cannot answer" in answer.lower() and "provided context" in answer.lower())))
             result["meta"]["cannot_answer"] = cannot_answer
             
-            # Enforce citations policy: if cannot_answer is True, citations must be []
-            if cannot_answer:
+            # Enforce citations policy: if cannot_answer or not requested, citations must be []
+            if cannot_answer or not request.include_citations:
                 result["citations"] = []
         
         return RAGAnswerResponse(

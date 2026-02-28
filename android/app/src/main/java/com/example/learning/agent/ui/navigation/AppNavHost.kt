@@ -22,6 +22,9 @@ fun AppNavHost(
     selectedDocumentId: String? = null,
     selectedDocumentTitle: String? = null,
     onDocumentSelect: (id: String, title: String?) -> Unit = { _, _ -> },
+    onDocumentDeselect: () -> Unit = {},
+    onDocumentDeleted: (documentId: String) -> Unit = {},
+    onAskAboutDocument: (id: String, title: String?) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     NavHost(
@@ -33,6 +36,8 @@ fun AppNavHost(
             FeedScreen(
                 selectedDocumentId = selectedDocumentId,
                 onDocumentSelect = onDocumentSelect,
+                onDocumentDeselect = onDocumentDeselect,
+                onDocumentDeleted = onDocumentDeleted,
                 onCardClick = { id ->
                     navController.navigate(Destination.FeedDetail.createRoute(id))
                 }
@@ -49,13 +54,16 @@ fun AppNavHost(
             val id = backStackEntry.arguments?.getString("id") ?: ""
             FeedDetailScreen(
                 id = id,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onAskAboutThis = onAskAboutDocument
             )
         }
         composable(Destination.Ask.route) {
             AskScreen(
                 selectedDocumentId = selectedDocumentId,
-                selectedDocumentTitle = selectedDocumentTitle
+                selectedDocumentTitle = selectedDocumentTitle,
+                onDocumentSelect = onDocumentSelect,
+                onDocumentDeselect = onDocumentDeselect
             )
         }
         composable(Destination.Notes.route) {

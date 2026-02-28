@@ -12,6 +12,11 @@ object DocumentsRepository {
         data class Error(val message: String) : Result()
     }
 
+    sealed class ReprocessResult {
+        data class Success(val jobId: String) : ReprocessResult()
+        data class Error(val message: String) : ReprocessResult()
+    }
+
     suspend fun getDocuments(
         limit: Int = 20,
         offset: Int = 0,
@@ -31,6 +36,33 @@ object DocumentsRepository {
             }
         } catch (e: Exception) {
             Result.Error(e.message ?: "Network error")
+        }
+    }
+
+    suspend fun deleteDocument(documentId: String): Result = withContext(Dispatchers.IO) {
+        try {
+            val response = ApiClient.documentsApi.deleteDocument(documentId)
+            if (response.isSuccessful) {
+                Result.Success(emptyList())
+            } else {
+                Result.Error("HTTP ${response.code()}: ${response.message()}")
+            }
+        } catch (e: Exception) {
+            Result.Error(e.message ?: "Network error")
+        }
+    }
+
+    suspend fun reprocessDocument(documentId: String): ReprocessResult = withContext(Dispatchers.IO) {
+        try {
+            val response = ApiClient.documentsApi.reprocessDocument(documentId)
+            if (response.isSuccessful) {
+                val jobId = response.body()?.job_id ?: ""
+                ReprocessResult.Success(jobId)
+            } else {
+                ReprocessResult.Error("HTTP ${response.code()}: ${response.message()}")
+            }
+        } catch (e: Exception) {
+            ReprocessResult.Error(e.message ?: "Network error")
         }
     }
 }

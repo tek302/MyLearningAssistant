@@ -30,4 +30,5 @@ object ApiClient {
     val ingestApi: IngestApi = retrofit.create(IngestApi::class.java)
     val documentsApi: DocumentsApi = retrofit.create(DocumentsApi::class.java)
     val ragApi: RagApi = retrofit.create(RagApi::class.java)
+    val meApi: MeApi = retrofit.create(MeApi::class.java)
 }

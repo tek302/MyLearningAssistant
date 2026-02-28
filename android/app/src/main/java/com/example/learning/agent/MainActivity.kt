@@ -113,8 +113,35 @@ fun MainScreen(
             selectedDocumentId = selectedDocumentId,
             selectedDocumentTitle = selectedDocumentTitle,
             onDocumentSelect = { id, title ->
+                // Toggle: tap same card again to deselect
+                if (id == selectedDocumentId) {
+                    selectedDocumentId = null
+                    selectedDocumentTitle = null
+                } else {
+                    selectedDocumentId = id
+                    selectedDocumentTitle = title
+                }
+            },
+            onDocumentDeselect = {
+                selectedDocumentId = null
+                selectedDocumentTitle = null
+            },
+            onDocumentDeleted = { documentId ->
+                if (documentId == selectedDocumentId) {
+                    selectedDocumentId = null
+                    selectedDocumentTitle = null
+                }
+            },
+            onAskAboutDocument = { id, title ->
                 selectedDocumentId = id
                 selectedDocumentTitle = title
+                navController.navigate(Destination.Ask.route) {
+                    popUpTo(navController.graph.startDestinationId) {
+                        saveState = true
+                    }
+                    launchSingleTop = true
+                    restoreState = true
+                }
             },
             modifier = Modifier.padding(paddingValues)
         )

@@ -9,6 +9,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -22,6 +23,7 @@ import kotlinx.coroutines.launch
 fun FeedDetailScreen(
     id: String,
     onBack: () -> Unit,
+    onAskAboutThis: (documentId: String, title: String?) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     var document by remember { mutableStateOf<DocumentsApi.DocumentItem?>(null) }
@@ -71,6 +73,10 @@ fun FeedDetailScreen(
             }
         } else {
             val doc = document!!
+            val hasTitle = !doc.title.isNullOrBlank()
+            val displayTitle = doc.title?.takeIf { it.isNotBlank() }
+                ?: doc.url?.substringAfterLast('/')?.take(50)
+                ?: "Document"
             Column(
                 modifier = modifier
                     .fillMaxSize()
@@ -78,11 +84,32 @@ fun FeedDetailScreen(
                     .verticalScroll(rememberScrollState())
                     .padding(16.dp)
             ) {
-                Text(
-                    text = doc.title ?: "Untitled",
-                    style = MaterialTheme.typography.headlineMedium,
-                    modifier = Modifier.padding(bottom = 16.dp)
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = displayTitle,
+                            style = MaterialTheme.typography.headlineMedium
+                        )
+                        if (!hasTitle && !doc.url.isNullOrBlank()) {
+                            Text(
+                                text = "Title not available",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    FilledTonalButton(
+                        onClick = { onAskAboutThis(doc.id, displayTitle) }
+                    ) {
+                        Text("Ask about this")
+                    }
+                }
 
                 Row(
                     modifier = Modifier
