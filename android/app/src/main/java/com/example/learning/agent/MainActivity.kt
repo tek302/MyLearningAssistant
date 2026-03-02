@@ -1,28 +1,91 @@
 package com.example.learning.agent
 
+import android.content.Intent
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.rememberNavController
+import com.example.learning.agent.data.repository.IngestRepository
+import com.example.learning.agent.data.repository.RefreshAndHighlightPrefs
 import com.example.learning.agent.ui.auth.AuthViewModel
 import com.example.learning.agent.ui.navigation.*
 import com.example.learning.agent.ui.screens.signin.SignInScreen
 import com.example.learning.agent.ui.theme.TekLearningAgentTheme
+import com.google.firebase.auth.FirebaseAuth
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val sharedUrl = consumeSendIntentUrl(intent)
+        if (sharedUrl != null) {
+            runHeadlessIngest(sharedUrl)
+            return
+        }
         setContent {
             TekLearningAgentTheme {
                 RootContent()
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val sharedUrl = consumeSendIntentUrl(intent)
+        if (sharedUrl != null) {
+            runHeadlessIngest(sharedUrl)
+        }
+    }
+
+    /** Returns URL if this was a SEND intent with text, and consumes the intent. */
+    private fun consumeSendIntentUrl(intent: Intent?): String? {
+        if (intent?.action != Intent.ACTION_SEND || intent.type != "text/plain") return null
+        val url = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()?.takeIf { it.isNotEmpty() }
+        setIntent(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER))
+        return url
+    }
+
+    /** Queue ingest and finish so user returns to the app they shared from (e.g. Chrome). */
+    private fun runHeadlessIngest(url: String) {
+        if (FirebaseAuth.getInstance().currentUser == null) {
+            Toast.makeText(this, "Sign in to add documents", Toast.LENGTH_SHORT).show()
+            finish()
+            return
+        }
+        setContent {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Adding document…", style = MaterialTheme.typography.bodyLarge)
+            }
+        }
+        lifecycleScope.launch {
+            val result = withContext(Dispatchers.IO) { IngestRepository.ingestUrl(url) }
+            withContext(Dispatchers.Main) {
+                when (result) {
+                    is IngestRepository.Result.Success -> {
+                        RefreshAndHighlightPrefs.setRefreshFromShareAtSync(applicationContext)
+                        Toast.makeText(this@MainActivity, "Added to your documents", Toast.LENGTH_SHORT).show()
+                    }
+                    is IngestRepository.Result.Error ->
+                        Toast.makeText(this@MainActivity, "Error: ${result.message}", Toast.LENGTH_LONG).show()
+                }
+                finish()
             }
         }
     }

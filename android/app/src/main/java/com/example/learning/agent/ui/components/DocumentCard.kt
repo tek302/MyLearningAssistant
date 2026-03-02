@@ -22,6 +22,7 @@ import com.example.learning.agent.data.remote.DocumentsApi
 fun DocumentCard(
     document: DocumentsApi.DocumentItem,
     isSelected: Boolean,
+    isHighlighted: Boolean = false,
     onSelect: () -> Unit,
     onAddNote: () -> Unit = {},
     onOpen: () -> Unit = {},
@@ -31,8 +32,12 @@ fun DocumentCard(
     onReprocess: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0f)
-    val borderWidth = if (isSelected) 2.dp else 0.dp
+    val borderColor = when {
+        isSelected -> MaterialTheme.colorScheme.primary
+        isHighlighted -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.outline.copy(alpha = 0f)
+    }
+    val borderWidth = if (isSelected || isHighlighted) 2.dp else 0.dp
     val hasTitle = !document.title.isNullOrBlank()
     val displayName = when {
         hasTitle -> document.title!!
@@ -48,8 +53,11 @@ fun DocumentCard(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-            else MaterialTheme.colorScheme.surface
+            containerColor = when {
+                isSelected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                isHighlighted -> MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+                else -> MaterialTheme.colorScheme.surface
+            }
         )
     ) {
         Column(

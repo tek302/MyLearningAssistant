@@ -11,10 +11,13 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.remote.DocumentsApi
 import com.example.learning.agent.data.repository.DocumentsRepository
+import com.example.learning.agent.data.repository.DocumentsCache
+import com.example.learning.agent.data.repository.RefreshAndHighlightPrefs
 import com.example.learning.agent.data.repository.IngestRepository
 import com.example.learning.agent.data.repository.TriggerRepository
 import com.example.learning.agent.ui.components.DocumentCard
@@ -42,8 +45,38 @@ fun FeedScreen(
     var isIngesting by remember { mutableStateOf(false) }
     var deleteConfirmDocumentId by remember { mutableStateOf<String?>(null) }
     var isDeletingDocument by remember { mutableStateOf(false) }
+    var highlightedDocumentIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val context = LocalContext.current.applicationContext
+
+    suspend fun applyNewDocumentList(newList: List<DocumentsApi.DocumentItem>) {
+        val known = RefreshAndHighlightPrefs.getKnownDocumentIds(context)
+        val currentIds = newList.map { it.id }.toSet()
+        if (known.isEmpty()) {
+            RefreshAndHighlightPrefs.setKnownDocumentIds(context, currentIds)
+            if (newList.isNotEmpty()) {
+                RefreshAndHighlightPrefs.addHighlighted(context, currentIds)
+                highlightedDocumentIds = highlightedDocumentIds + currentIds
+            } else {
+                highlightedDocumentIds = RefreshAndHighlightPrefs.getHighlightedDocumentIds(context)
+            }
+            return
+        }
+        val newIds = currentIds - known
+        if (newIds.isNotEmpty()) {
+            RefreshAndHighlightPrefs.addHighlighted(context, newIds)
+            highlightedDocumentIds = highlightedDocumentIds + newIds
+        }
+        RefreshAndHighlightPrefs.setKnownDocumentIds(context, currentIds)
+    }
+
+    fun doDocumentSeen(id: String) {
+        scope.launch {
+            RefreshAndHighlightPrefs.removeHighlighted(context, id)
+            highlightedDocumentIds = highlightedDocumentIds - id
+        }
+    }
 
     fun loadPage(offset: Int, append: Boolean) {
         if (isLoading) return
@@ -55,6 +88,8 @@ fun FeedScreen(
                     val newList = if (append) documents + r.documents else r.documents
                     documents = newList
                     loadMoreEnabled = r.documents.size >= PAGE_SIZE
+                    DocumentsCache.saveCachedDocuments(context, newList)
+                    applyNewDocumentList(newList)
                 }
                 is DocumentsRepository.Result.Error -> {
                     loadError = r.message
@@ -74,6 +109,8 @@ fun FeedScreen(
                 is DocumentsRepository.Result.Success -> {
                     documents = r.documents
                     loadMoreEnabled = r.documents.size >= PAGE_SIZE
+                    DocumentsCache.saveCachedDocuments(context, r.documents)
+                    applyNewDocumentList(r.documents)
                 }
                 is DocumentsRepository.Result.Error -> {
                     loadError = r.message
@@ -139,7 +176,20 @@ fun FeedScreen(
     }
 
     LaunchedEffect(Unit) {
-        loadPage(0, append = false)
+        val shouldRefresh = RefreshAndHighlightPrefs.shouldRefreshFromShare(context)
+        highlightedDocumentIds = RefreshAndHighlightPrefs.getHighlightedDocumentIds(context)
+        if (shouldRefresh) {
+            RefreshAndHighlightPrefs.clearRefreshFromShareAt(context)
+            loadPage(0, append = false)
+        } else {
+            val cached = DocumentsCache.getCachedDocuments(context)
+            if (!cached.isNullOrEmpty()) {
+                documents = cached
+                loadMoreEnabled = cached.size >= PAGE_SIZE
+            } else {
+                loadPage(0, append = false)
+            }
+        }
     }
 
     // Delete confirmation dialog
@@ -365,14 +415,19 @@ fun FeedScreen(
                                 DocumentCard(
                                     document = doc,
                                     isSelected = doc.id == selectedDocumentId,
+                                    isHighlighted = doc.id in highlightedDocumentIds,
                                     onSelect = {
+                                        doDocumentSeen(doc.id)
                                         val displayName = doc.title?.takeIf { it.isNotBlank() }
                                             ?: doc.url?.substringAfterLast('/')?.take(60)
                                             ?: "Document"
                                         onDocumentSelect(doc.id, displayName)
                                     },
                                     onAddNote = { /* TODO */ },
-                                    onOpen = { onCardClick(doc.id) },
+                                    onOpen = {
+                                        doDocumentSeen(doc.id)
+                                        onCardClick(doc.id)
+                                    },
                                     onRefresh = { doRefresh() },
                                     onTriggerWorker = { doTriggerWorker() },
                                     onDelete = { deleteConfirmDocumentId = doc.id },

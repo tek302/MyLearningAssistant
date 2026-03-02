@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from ..db.pool import resolve_user_id, with_connection
 from ..db.repo import SupabaseRepo
 from ..utils.deps import get_user_id
+from ..utils.arxiv_url import normalize_arxiv_url
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -79,6 +80,8 @@ async def ingest_enqueue(
             detail="content is required and must be non-empty",
         )
     url_value = content if request.type in ("pdf_url", "url") else None
+    if request.type == "pdf_url" and url_value:
+        url_value = normalize_arxiv_url(url_value)
     source_id = await asyncio.to_thread(
         _upsert_source_pending,
         user_id,

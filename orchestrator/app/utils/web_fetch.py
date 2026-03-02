@@ -1,6 +1,7 @@
 import os
 import re
 from typing import Dict, Any
+from urllib.parse import quote, urlparse
 from dotenv import load_dotenv
 import requests
 from requests.adapters import HTTPAdapter
@@ -238,6 +239,60 @@ def _fetch_html_text(url: str, timeout: int = 10) -> Dict[str, Any]:
     }
 
 
+def _is_x_twitter_url(url: str) -> bool:
+    """True if URL is a Twitter/X tweet (e.g. twitter.com/user/status/123 or x.com/user/status/123)."""
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+        netloc = (parsed.netloc or "").lower()
+        path = (parsed.path or "").lower()
+        if "twitter.com" not in netloc and "x.com" not in netloc:
+            return False
+        return "/status/" in path
+    except Exception:
+        return False
+
+
+def _fetch_x_oembed_text(url: str, timeout: int = 10) -> Dict[str, Any]:
+    """
+    Fetch tweet content via X/Twitter oEmbed API (no auth required).
+    Returns same shape as _fetch_html_text: url, title, text, lang, meta.
+    """
+    oembed_url = f"https://publish.twitter.com/oembed?url={quote(url, safe='')}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; LearningAgent/1.0; +https://github.com/learning-agent)",
+    }
+    response = requests.get(oembed_url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+
+    html = data.get("html") or ""
+    author_name = data.get("author_name") or "Unknown"
+    # Strip HTML to get plain text
+    if HAS_BS4 and html:
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+    else:
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = re.sub(r"\s+", " ", text).strip()
+
+    if not text or len(text) < 20:
+        raise ValueError("Could not extract tweet text from oEmbed response")
+
+    title = f"Tweet by {author_name}"
+
+    return {
+        "url": url,
+        "title": title,
+        "text": text,
+        "lang": "en",
+        "meta": {"content_type": "x_oembed", "author_name": author_name},
+    }
+
+
 def fetch_url_text(url: str, timeout: int = 30) -> Dict[str, Any]:
     """
     Fetch URL and extract text content.
@@ -276,7 +331,14 @@ def fetch_url_text(url: str, timeout: int = 30) -> Dict[str, Any]:
     
     # Determine if PDF
     is_pdf = is_pdf_url or (content_type and "application/pdf" in content_type)
-    
+
+    # X/Twitter tweet URL: use oEmbed (no JS render needed)
+    if _is_x_twitter_url(url):
+        try:
+            return _fetch_x_oembed_text(url, timeout=min(timeout, 10))
+        except Exception as e:
+            raise ValueError(f"X/Twitter URL could not be fetched: {e}") from e
+
     # Fetch and extract based on content type
     if is_pdf:
         result = _fetch_pdf_text(url, timeout=timeout)

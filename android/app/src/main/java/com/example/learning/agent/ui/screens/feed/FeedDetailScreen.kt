@@ -13,6 +13,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import android.content.Intent
+import android.net.Uri
 import com.example.learning.agent.data.remote.DocumentsApi
 import com.example.learning.agent.data.repository.DocumentsRepository
 import com.example.learning.agent.ui.theme.TekLearningAgentTheme
@@ -73,6 +75,7 @@ fun FeedDetailScreen(
             }
         } else {
             val doc = document!!
+            val context = LocalContext.current
             val hasTitle = !doc.title.isNullOrBlank()
             val displayTitle = doc.title?.takeIf { it.isNotBlank() }
                 ?: doc.url?.substringAfterLast('/')?.take(50)
@@ -108,6 +111,21 @@ fun FeedDetailScreen(
                         onClick = { onAskAboutThis(doc.id, displayTitle) }
                     ) {
                         Text("Ask about this")
+                    }
+                }
+
+                if (!doc.url.isNullOrBlank()) {
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(doc.url))
+                                )
+                            } catch (_: Exception) { }
+                        },
+                        modifier = Modifier.padding(top = 8.dp)
+                    ) {
+                        Text("원문 보기")
                     }
                 }
 

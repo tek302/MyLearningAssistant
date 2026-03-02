@@ -22,16 +22,19 @@ object IngestRepository {
     }
 
     /**
-     * Infer type: pdf_url if path endsWith ".pdf", path contains "/pdf/", or query has format=pdf/download=pdf.
+     * Infer type: pdf_url if path endsWith ".pdf", path contains "/pdf/", or host is arxiv with /abs/;
+     * else url. Backend normalizes arxiv abs -> pdf when type is pdf_url.
      */
     private fun inferIngestType(url: String): String = runCatching {
         val uri = Uri.parse(url) ?: return@runCatching "url"
+        val host = uri.host?.lowercase() ?: ""
         val path = uri.path?.lowercase() ?: ""
         val query = uri.query?.lowercase() ?: ""
         when {
             path.endsWith(".pdf") -> "pdf_url"
             "/pdf/" in path -> "pdf_url"
             "format=pdf" in query || "download=pdf" in query -> "pdf_url"
+            (host == "arxiv.org" || host == "www.arxiv.org") && path.startsWith("/abs/") -> "pdf_url"
             else -> "url"
         }
     }.getOrElse { "url" }
