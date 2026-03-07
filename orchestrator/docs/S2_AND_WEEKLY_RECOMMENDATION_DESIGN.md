@@ -4,7 +4,8 @@
 - **S2 Consolidation**: 1주일 동안 ingest한 문서들의 **주요 technical points**를 정리해서 보여주기
 - **Weekly Recommendation**: 그 다음 읽을 **paper/article** 추천
 
-이 문서는 BE 설계, 로컬 우선 테스트 전략, Android UX 변경을 함께 정리한다.
+이 문서는 BE 설계, 로컬 우선 테스트 전략, Android UX 변경을 함께 정리한다.  
+**구현 상태·현재 이슈**: `S2_WEEKLY_STATUS_AND_NEXT.md`, `WEEKLY_RECOMMENDATION_PLAN.md` 참고.
 
 ---
 

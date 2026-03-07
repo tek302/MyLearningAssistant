@@ -1,24 +1,30 @@
 package com.example.learning.agent.ui.components
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.models.Recommendation
 
 @Composable
 fun RecommendationCard(
     recommendation: Recommendation,
-    onThumbsUp: () -> Unit = {},
-    onThumbsDown: () -> Unit = {},
-    onSave: () -> Unit = {},
-    onDismiss: () -> Unit = {},
+    onProcess: () -> Unit = {},
+    onRemove: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    var abstractExpanded by remember { mutableStateOf(false) }
+    val abstractText = recommendation.abstract?.trim()?.ifEmpty { null }
+    val maxAbstractLines = if (abstractExpanded) Int.MAX_VALUE else 3
+
     Card(
         modifier = modifier
             .fillMaxWidth()
@@ -37,47 +43,68 @@ fun RecommendationCard(
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
-            // Source and date
+            // Abstract (expandable)
+            if (abstractText != null) {
+                Text(
+                    text = abstractText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = maxAbstractLines,
+                    modifier = Modifier.padding(bottom = 4.dp)
+                )
+                if (abstractText.length > 180) {
+                    TextButton(
+                        onClick = { abstractExpanded = !abstractExpanded },
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Text(if (abstractExpanded) "Show less" else "Show more")
+                    }
+                }
+            }
+
+            // Source, date, and link to original
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = recommendation.source,
+                    text = "${recommendation.source} · ${recommendation.displayDate.ifEmpty { "" }}".trimEnd(' ', '·', ' '),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Text(
-                    text = recommendation.date,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                if (recommendation.url.isNotBlank()) {
+                    TextButton(
+                        onClick = {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(recommendation.url)))
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Original", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+
+            // Optional score bar
+            recommendation.score?.let { score ->
+                Spacer(modifier = Modifier.height(12.dp))
+                ScoreBar(score = score)
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Score bar
-            ScoreBar(score = recommendation.score)
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Actions row
+            // Actions: Process (ingest + remove from list), Remove (delete only)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                IconButton(onClick = onThumbsUp) {
-                    Icon(Icons.Default.ThumbUp, contentDescription = "Like")
+                Button(onClick = onProcess) {
+                    Text("Process")
                 }
-                IconButton(onClick = onThumbsDown) {
-                    Icon(Icons.Default.ThumbDown, contentDescription = "Dislike")
-                }
-                TextButton(onClick = onSave) {
-                    Text("Save")
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("Dismiss")
+                OutlinedButton(onClick = onRemove) {
+                    Text("Remove")
                 }
             }
         }
@@ -116,4 +143,3 @@ fun ScoreBar(
         )
     }
 }
-

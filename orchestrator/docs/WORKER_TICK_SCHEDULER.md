@@ -45,7 +45,7 @@
 
 ```bash
 # 변수 설정 (본인 값으로 교체)
-export PROJECT_ID=my-learning-agent-488300
+export PROJECT_ID=$Example
 export REGION=us-east1
 export SERVICE_URL=https://YOUR-CLOUD-RUN-SERVICE-URL
 export WORKER_TICK_SECRET=your-secret-value
@@ -78,3 +78,67 @@ gcloud scheduler jobs create http worker-tick \
 | 대안 | 앱 "Process" | `POST /me/trigger-worker` (Bearer) → 위와 동일한 claim + process_job |
 
 `CLOUD_RUN_MIGRATION_PLAN.md` §10.7, §10.8과 `ANDROID_CLOUD_E2E.md` §4.3도 함께 참고하면 됩니다.
+
+---
+
+## S2 주간 요약 스케줄 (금요일 00:00 미국 동부)
+
+S2 consolidation은 **매주 금요일 00:00 미국 동부(ET)** 에 전체 사용자 대상으로 한 번씩 돌리도록 Cloud Scheduler를 추가할 수 있습니다.
+
+### 동작
+
+- **엔드포인트**: `POST /worker/s2-schedule`
+- **인증**: `POST /worker/tick`과 동일하게 `X-Worker-Tick-Secret` 헤더 사용 (WORKER_TICK_SECRET 설정 시).
+- **로직**: 최근 7일 이내에 소스가 하나라도 있는 사용자마다 S2 job 1건을 enqueue. `week_start`는 해당 주 월요일(YYYY-MM-DD).
+- **실제 처리**: enqueue된 job은 기존 `POST /worker/tick`이 claim해서 처리 (job_type='s2' 분기).
+
+### Cloud Scheduler 설정 (금요일 00:00 ET)
+
+- **Frequency**: cron `0 0 * * 5` (매주 금요일 00:00).
+- **Time zone**: `America/New_York` (미국 동부).
+- **URL**: `https://<YOUR-CLOUD-RUN-URL>/worker/s2-schedule`
+- **HTTP method**: POST.
+- **Header**: `X-Worker-Tick-Secret`: (WORKER_TICK_SECRET과 동일).
+
+gcloud 예시 (Bash):
+
+```bash
+export PROJECT_ID=your-project
+export REGION=us-east1
+export SERVICE_URL=https://YOUR-CLOUD-RUN-URL
+export WORKER_TICK_SECRET=your-secret
+
+gcloud scheduler jobs create http worker-s2-schedule \
+  --project=$PROJECT_ID \
+  --location=$REGION \
+  --schedule="0 0 * * 5" \
+  --time-zone="America/New_York" \
+  --uri="$SERVICE_URL/worker/s2-schedule" \
+  --http-method=POST \
+  --headers="X-Worker-Tick-Secret=$WORKER_TICK_SECRET"
+```
+
+PowerShell (Windows):
+
+```powershell
+$env:PROJECT_ID = "your-project"
+$env:REGION = "us-east1"
+$env:SERVICE_URL = "https://YOUR-CLOUD-RUN-URL"
+$env:WORKER_TICK_SECRET = "your-secret"
+
+gcloud scheduler jobs create http worker-s2-schedule `
+  --project=$env:PROJECT_ID `
+  --location=$env:REGION `
+  --schedule="0 0 * * 5" `
+  --time-zone="America/New_York" `
+  --uri="$env:SERVICE_URL/worker/s2-schedule" `
+  --http-method=POST `
+  --headers="X-Worker-Tick-Secret=$env:WORKER_TICK_SECRET"
+```
+
+### 로컬/테스트
+
+- **스케줄러 없이**: 로컬에서는 Cloud Scheduler를 쓰지 않고, **기존 문서(최근 7일) 기준**으로 테스트하면 됩니다.
+- **방법 1**: 앱/클라이언트에서 `POST /jobs/s2` (Bearer 인증) 호출 → 해당 사용자에 대해 S2 job 1건 enqueue. 그 다음 `POST /worker/tick` 또는 `POST /me/trigger-worker`로 job 처리.
+- **방법 2**: 스크립트/쉘에서 `run_s2_consolidation(user_id, week_start=None, days=7)` 직접 호출 (DB에 이미 있는 소스/S1 기준).
+- **GET /s2**: 생성된 S2 요약 목록 조회 (query: `week_start`, `limit`).

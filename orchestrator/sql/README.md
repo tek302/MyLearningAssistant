@@ -24,6 +24,8 @@
    
    -- 4. Jobs 테이블 (Week6 단일 프로세스 비동기 인제스트)
    -- orchestrator/sql/50_schema_jobs.sql 파일 내용 실행
+   -- 5. Jobs payload (S2 등): 51_jobs_payload.sql
+   -- 6. Recommendations (주간 arXiv 추천): 52_schema_recommendations.sql
    ```
 
    또는 Supabase CLI를 사용하는 경우:
@@ -49,6 +51,7 @@
 - **rag_runs** (선택사항): RAG 쿼리 실행 로그
 - **rag_events** (선택사항): RAG 이벤트 로그
 - **jobs** (Week6): 비동기 인제스트 작업 (queued/running/done/failed)
+- **recommendations**: 주간 arXiv 추천 (title, abstract, 원문 url; Process 시에만 ingest)
 
 ## 주의사항
 

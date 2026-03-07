@@ -1,5 +1,6 @@
 import os
 import uuid
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 import psycopg
 from psycopg import errors as psycopg_errors
@@ -365,6 +366,155 @@ class SupabaseRepo:
                 result = cur.fetchone()
                 conn.commit()
                 return str(result[0])
+
+    def get_sources_for_user_since(
+        self, user_id: str, since_ts: Optional[datetime] = None, days: int = 7
+    ) -> List[Dict[str, Any]]:
+        """Return sources for user with created_at >= since_ts, or last `days` days if since_ts is None. For S2 consolidation."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        if since_ts is None:
+            since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, created_at FROM sources
+                    WHERE user_id = %s AND created_at >= %s
+                    ORDER BY created_at ASC
+                    """,
+                    (user_uuid, since_ts),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                return [dict(zip(cols, row)) for row in rows]
+
+    def get_sources_for_user_between(
+        self, user_id: str, start_ts: datetime, end_ts: datetime
+    ) -> List[Dict[str, Any]]:
+        """Return sources for user where start_ts <= created_at < end_ts. For week-based S2."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, created_at FROM sources
+                    WHERE user_id = %s AND created_at >= %s AND created_at < %s
+                    ORDER BY created_at ASC
+                    """,
+                    (user_uuid, start_ts, end_ts),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                return [dict(zip(cols, row)) for row in rows]
+
+    def get_user_ids_with_sources_since(self, days: int = 7) -> List[str]:
+        """Return distinct user_id (UUID string) that have at least one source created in the last `days` days. For S2 schedule."""
+        since = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT user_id FROM sources
+                    WHERE created_at >= %s
+                    """,
+                    (since,),
+                )
+                rows = cur.fetchall()
+                return [str(row[0]) for row in rows]
+
+    def get_s1_summaries_for_sources(self, source_ids: List[str]) -> List[Dict[str, Any]]:
+        """Return S1 summaries (tldr, bullets) for the given source ids. For S2 input."""
+        if not source_ids:
+            return []
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT source_id, tldr, bullets
+                    FROM summaries
+                    WHERE source_id = ANY(%s::uuid[]) AND scope = 'doc' AND kind = 'S1'
+                    ORDER BY source_id
+                    """,
+                    (source_ids,),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out = [dict(zip(cols, row)) for row in rows]
+                for o in out:
+                    if o.get("source_id") is not None:
+                        o["source_id"] = str(o["source_id"])
+                return out
+
+    def delete_s2_for_user_week(self, user_id: str, week_start: str) -> int:
+        """Delete existing S2 summary for user and week_start. Returns deleted count."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM summaries
+                    WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
+                    AND extra->>'week_start' = %s
+                    """,
+                    (user_uuid, week_start),
+                )
+                deleted = cur.rowcount
+                conn.commit()
+                return deleted
+
+    def insert_summary_s2(
+        self,
+        user_id: str,
+        week_start: str,
+        tldr: str,
+        bullets: List[str],
+        source_ids: Optional[List[str]] = None,
+        topic_name: str = "This Week",
+    ) -> str:
+        """Insert S2 (topic-scope) summary. source_id is NULL. extra has week_start, topic_name, source_ids."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        extra = {"week_start": week_start, "topic_name": topic_name}
+        if source_ids:
+            extra["source_ids"] = source_ids
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO summaries (user_id, scope, kind, source_id, tldr, bullets, extra)
+                    VALUES (%s, 'topic', 'S2', NULL, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (user_uuid, tldr, psycopg.types.json.Jsonb(bullets), psycopg.types.json.Jsonb(extra)),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
+    def get_s2_for_user_week(self, user_id: str, week_start: str) -> Optional[Dict[str, Any]]:
+        """Return S2 summary for user and week_start (tldr, bullets, id). None if not found. For arXiv recommendations."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, tldr, bullets, extra
+                    FROM summaries
+                    WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
+                    AND extra->>'week_start' = %s
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (user_uuid, week_start),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                out = dict(zip(cols, row))
+                out["id"] = str(out["id"])
+                if out.get("bullets") is not None and hasattr(out["bullets"], "__iter__") and not isinstance(out["bullets"], str):
+                    out["bullets"] = list(out["bullets"])
+                return out
     
     def _check_sources_has_meta(self, conn) -> bool:
         """
@@ -501,18 +651,19 @@ class SupabaseRepo:
         user_id: str,
         job_type: str,
         source_id: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Insert a job row and return job_id (UUID)."""
+        """Insert a job row and return job_id (UUID). payload is optional (e.g. {\"week_start\": \"YYYY-MM-DD\"} for s2)."""
         user_uuid = self._get_or_create_user_id(user_id)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO jobs (user_id, job_type, source_id)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO jobs (user_id, job_type, source_id, payload)
+                    VALUES (%s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (user_uuid, job_type, source_id),
+                    (user_uuid, job_type, source_id, psycopg.types.json.Jsonb(payload) if payload else None),
                 )
                 row = cur.fetchone()
                 conn.commit()
@@ -524,7 +675,7 @@ class SupabaseRepo:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, user_id, job_type, state, progress, source_id, error, created_at, updated_at
+                    SELECT id, user_id, job_type, state, progress, source_id, error, payload, created_at, updated_at
                     FROM jobs WHERE id = %s
                     """,
                     (job_id,),
@@ -540,6 +691,8 @@ class SupabaseRepo:
                 for k in ("created_at", "updated_at"):
                     if out.get(k) is not None:
                         out[k] = out[k].isoformat()
+                if out.get("payload") is not None and hasattr(out["payload"], "copy"):
+                    out["payload"] = dict(out["payload"])
                 return out
 
     def claim_one_queued_job(self) -> Optional[str]:
@@ -601,8 +754,10 @@ class SupabaseRepo:
         progress: Optional[int] = None,
         error: Optional[str] = None,
         source_id: Optional[str] = None,
+        payload_merge: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Update job fields. Only non-None args are updated. updated_at set to now()."""
+        """Update job fields. Only non-None args are updated. updated_at set to now().
+        payload_merge: merge into existing payload (e.g. {"recommendations_failed": True})."""
         updates: List[str] = ["updated_at = now()"]
         params: List[Any] = []
         if state is not None:
@@ -617,6 +772,9 @@ class SupabaseRepo:
         if source_id is not None:
             updates.append("source_id = %s")
             params.append(source_id)
+        if payload_merge is not None:
+            updates.append("payload = COALESCE(payload, '{}'::jsonb) || %s::jsonb")
+            params.append(psycopg.types.json.Jsonb(payload_merge))
         if len(params) == 0:
             return
         params.append(job_id)
@@ -699,4 +857,110 @@ class SupabaseRepo:
                     params,
                 )
                 conn.commit()
+
+    # --- Recommendations (weekly arXiv) ---
+
+    def insert_recommendation(
+        self,
+        user_id: str,
+        topic_name: str,
+        week_start: str,
+        title: str,
+        abstract: Optional[str],
+        url: str,
+        source: str = "arXiv",
+        score: Optional[float] = None,
+    ) -> str:
+        """Insert one recommendation row. Returns recommendation id."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO recommendations (user_id, topic_name, week_start, title, abstract, url, source, score)
+                    VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (user_uuid, topic_name, week_start, title, abstract or "", url, source, score),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
+    def list_recommendations(
+        self,
+        user_id: str,
+        week_start: Optional[str] = None,
+        topic_name: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List recommendations for user, newest first. Optional filter by week_start, topic_name."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT id, topic_name, week_start, title, abstract, url, source, score, created_at
+                    FROM recommendations
+                    WHERE user_id = %s
+                """
+                params: List[Any] = [user_uuid]
+                if week_start:
+                    q += " AND week_start = %s::date"
+                    params.append(week_start)
+                if topic_name:
+                    q += " AND topic_name = %s"
+                    params.append(topic_name)
+                q += " ORDER BY created_at DESC LIMIT %s"
+                params.append(limit)
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    d["id"] = str(d["id"])
+                    if d.get("week_start") is not None:
+                        d["week_start"] = d["week_start"].isoformat() if hasattr(d["week_start"], "isoformat") else str(d["week_start"])
+                    if d.get("created_at") is not None:
+                        d["created_at"] = d["created_at"].isoformat() if hasattr(d["created_at"], "isoformat") else str(d["created_at"])
+                    out.append(d)
+                return out
+
+    def get_recommendation_by_id(self, recommendation_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get one recommendation by id if owned by user. None otherwise."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, topic_name, week_start, title, abstract, url, source, score, created_at
+                    FROM recommendations
+                    WHERE id = %s AND user_id = %s
+                    """,
+                    (recommendation_id, user_uuid),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                d = dict(zip(cols, row))
+                d["id"] = str(d["id"])
+                if d.get("week_start") is not None:
+                    d["week_start"] = d["week_start"].isoformat() if hasattr(d["week_start"], "isoformat") else str(d["week_start"])
+                if d.get("created_at") is not None:
+                    d["created_at"] = d["created_at"].isoformat() if hasattr(d["created_at"], "isoformat") else str(d["created_at"])
+                return d
+
+    def delete_recommendation(self, recommendation_id: str, user_id: str) -> bool:
+        """Delete recommendation by id if owned by user. Returns True if a row was deleted."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM recommendations WHERE id = %s AND user_id = %s",
+                    (recommendation_id, user_uuid),
+                )
+                deleted = cur.rowcount
+                conn.commit()
+                return deleted > 0
 

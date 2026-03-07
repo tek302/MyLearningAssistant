@@ -5,6 +5,7 @@ Uses get_database_url from config. Context managers only; no ORM.
 """
 from __future__ import annotations
 
+import uuid
 from contextlib import contextmanager
 from typing import Optional
 
@@ -57,9 +58,18 @@ def with_connection():
 def resolve_user_id(cur: Cursor, firebase_uid: str) -> str:
     """
     Get user UUID from users table, or create if missing.
-    Treats firebase_uid as the canonical user identifier.
+    If the value looks like a UUID, first try to resolve as users.id (so AUTH_BYPASS_USER_ID
+    can be either firebase_uid or users.id). Otherwise treat as firebase_uid.
     Returns UUID string.
     """
+    try:
+        uuid_obj = uuid.UUID(firebase_uid)
+        cur.execute("SELECT id FROM users WHERE id = %s", (str(uuid_obj),))
+        row = cur.fetchone()
+        if row:
+            return str(row[0])
+    except (ValueError, TypeError):
+        pass
     cur.execute(
         """
         INSERT INTO users (firebase_uid)

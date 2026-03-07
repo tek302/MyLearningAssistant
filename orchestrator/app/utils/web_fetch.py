@@ -1,5 +1,6 @@
 import os
 import re
+import logging
 from typing import Dict, Any
 from urllib.parse import quote, urlparse
 from dotenv import load_dotenv
@@ -21,6 +22,17 @@ except ImportError:
 
 # Load environment variables
 load_dotenv()
+
+# Browser-like headers to reduce 404/403 from sites that block minimal User-Agents (e.g. Medium, some CDNs).
+# Incomplete UA (e.g. no "Chrome/xxx") often triggers bot detection.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 def get_max_pdf_mb() -> int:
@@ -76,12 +88,8 @@ def _fetch_pdf_text(url: str, timeout: int = 30) -> Dict[str, Any]:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     
-    # Set headers to mimic a browser
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    
-    # Download PDF with size limit
+    # Use browser-like headers so sites (e.g. Medium) don't return 404 for bot-like requests
+    headers = {**BROWSER_HEADERS}
     max_size_bytes = get_max_pdf_mb() * 1024 * 1024
     response = session.get(url, headers=headers, timeout=timeout, stream=True)
     response.raise_for_status()
@@ -161,13 +169,23 @@ def _fetch_html_text(url: str, timeout: int = 10) -> Dict[str, Any]:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     
-    # Set headers to mimic a browser
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    # Use browser-like headers so sites (e.g. Medium) don't return 404 for bot-like requests
+    headers = {**BROWSER_HEADERS}
+    # Some sites (e.g. Medium) return 403 without Referer; set origin from URL
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+    except Exception:
+        pass
     
     # Fetch the URL
     response = session.get(url, headers=headers, timeout=timeout)
+    if not response.ok:
+        logging.getLogger(__name__).warning(
+            "HTML fetch failed: url=%s status=%s final_url=%s",
+            url, response.status_code, response.url
+        )
     response.raise_for_status()
     
     content_type = response.headers.get("Content-Type", "").lower()
@@ -313,9 +331,7 @@ def fetch_url_text(url: str, timeout: int = 30) -> Dict[str, Any]:
     # First, make a HEAD request to check content type (if possible)
     # Otherwise, we'll check during GET
     session = requests.Session()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {**BROWSER_HEADERS}
     
     # Check if URL ends with .pdf
     is_pdf_url = url.lower().endswith(".pdf")

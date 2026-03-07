@@ -115,35 +115,25 @@ object FakeRepository {
     fun getRecommendations(month: String = "This Month"): List<Recommendation> = listOf(
         Recommendation(
             id = "r1",
+            topicName = "This Week",
+            weekStart = "2026-03-03",
             title = "Advanced Transformer Architectures",
+            abstract = "A survey of recent advances in transformer architectures for NLP.",
+            url = "https://arxiv.org/abs/2401.00001",
             source = "arXiv",
-            date = "2024-01-20",
             score = 0.92f,
-            topic = "AI & Society"
+            createdAt = "2026-03-01T12:00:00Z"
         ),
         Recommendation(
             id = "r2",
+            topicName = "This Week",
+            weekStart = "2026-03-03",
             title = "Modern Compiler Construction",
-            source = "ACM",
-            date = "2024-01-18",
+            abstract = "Techniques for building optimizing compilers.",
+            url = "https://arxiv.org/abs/2401.00002",
+            source = "arXiv",
             score = 0.85f,
-            topic = "Compilers"
-        ),
-        Recommendation(
-            id = "r3",
-            title = "GPU Architecture Deep Dive",
-            source = "IEEE",
-            date = "2024-01-15",
-            score = 0.78f,
-            topic = "GPUs"
-        ),
-        Recommendation(
-            id = "r4",
-            title = "Ethical AI Development",
-            source = "Nature",
-            date = "2024-01-12",
-            score = 0.88f,
-            topic = "AI & Society"
+            createdAt = "2026-03-01T12:00:00Z"
         )
     )
 

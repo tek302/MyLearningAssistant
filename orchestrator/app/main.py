@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI
 
 from app.config import load_env
 from app.db.pool import close_pool, init_pool
-from app.routers import documents, graph_test, ingest, ingest_status, rag, worker
+from app.routers import documents, graph_test, ingest, ingest_status, rag, recommendations, s2, s2_list, worker
 from app.utils.deps import get_user_id
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,9 @@ app.include_router(ingest_status.router)
 app.include_router(rag.router)
 app.include_router(documents.router)
 app.include_router(worker.router)
+app.include_router(s2.router)
+app.include_router(s2_list.router)
+app.include_router(recommendations.router)
 
 
 @app.get("/health")
@@ -43,8 +46,18 @@ async def health():
 
 @app.get("/me")
 async def me(user_id: str = Depends(get_user_id)):
-    """Return current user's firebase_uid (for token check / who-am-i)."""
-    return {"firebase_uid": user_id}
+    """Return current user's firebase_uid (for token check / who-am-i). In bypass mode also returns resolved_user_id (UUID) for DB comparison."""
+    out = {"firebase_uid": user_id}
+    if user_id:
+        import asyncio
+        from app.db.repo import SupabaseRepo
+        try:
+            repo = SupabaseRepo()
+            resolved = await asyncio.to_thread(repo._get_or_create_user_id, user_id)
+            out["resolved_user_id"] = resolved
+        except Exception:
+            pass
+    return out
 
 
 @app.post("/me/trigger-worker")

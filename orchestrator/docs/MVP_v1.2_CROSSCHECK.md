@@ -15,8 +15,8 @@
 | **5** | Android Minimal | ✅ 완료 | Firebase auth, Android→Cloud→RAG, URL/PDF ingest |
 | **6** | Usability & Integration | ✅ 완료 | POST /ingest→job_id, GET /ingest/status, GET /documents(=feed), worker/tick, 앱에서 Process/Re-process |
 | **7** | Cloud E2E Pilot | ✅ 완료 | Cloud Run 배포, Android→Cloud E2E, ANDROID_CLOUD_E2E.md |
-| **8** | S2 Consolidation | ⚠️ 미구현 | DB에는 summaries(scope=topic, kind=S2) 스키마 있음. **배치 S2 생성 job/API 없음** |
-| **9** | Weekly Recommendation | ❌ 미구현 | 파이프라인 없음. Android Recommendations 화면은 Fake 데이터. 후보/추천 테이블 없음 |
+| **8** | S2 Consolidation | ✅ 완료 | DB summaries(scope=topic, kind=S2), POST /jobs/s2, GET /s2, Cloud Scheduler(금 00:00 ET), Android Weekly Summary 탭(주별 카드·캐시·Re-process·상세) |
+| **9** | Weekly Recommendation | ✅ 완료 | S2 job 내 arXiv Top 3 추천 생성, recommendations 테이블, GET/DELETE /recommendations, Android Recommendations 탭 실데이터(Process·Remove·필터) |
 | **10** | MVP Closure | ❌ 미진입 | 데모 시나리오 정리, 메트릭 스냅샷, Post-MVP 백로그 미작성 |
 
 ---
@@ -30,10 +30,27 @@
 | GET /sources | ✅ | GET /documents 로 구현 (S1 포함) |
 | GET /feed | ✅ | GET /documents + include_summary 로 동일 역할 |
 | POST /rag/answer | ✅ | document_id 선택 지원 |
-| POST /jobs/s2 | ❌ | S2 배치 트리거 없음 |
-| POST /jobs/recommendations | ❌ | 주간 추천 파이프라인 없음 |
+| POST /jobs/s2 | ✅ | S2 배치 트리거, week_start 지원, Cloud Scheduler 연동 |
+| GET /s2 | ✅ | week_start, limit 쿼리. Android Weekly Summary에서 사용 |
+| GET /recommendations | ✅ | week_start, topic_name, limit. Android Recommendations 탭 실데이터 |
+| DELETE /recommendations/{id} | ✅ | 추천 1건 삭제(본인 소유). Process 후 삭제·Remove 버튼용 |
+| (추천 생성) | ✅ | 별도 POST /jobs/recommendations 없음. S2 job 성공 직후 동일 run에서 arXiv Top 3 생성·INSERT, 실패 시 job은 성공·payload에 recommendations_failed |
 
-추가로 구현된 것: DELETE /documents/{id}, POST /documents/{id}/reprocess, POST /me/trigger-worker, /health, /me.
+추가로 구현된 것: DELETE /documents/{id}, POST /documents/{id}/reprocess, POST /me/trigger-worker, /health, /me.  
+**Android:** Map → Weekly Summary(S2 실데이터). **Recommendations → 실데이터 연동 완료** (GET /recommendations, Process=ingest+삭제, Remove=삭제만, Time range·Topic 필터).
+
+---
+
+### MVP Week 9 vs 현재 구현 비교
+
+| MVP 요구 | 현재 구현 | 일치 |
+|----------|-----------|------|
+| recommendations 테이블 | sql/52 적용, user_id·topic_name·week_start·title·abstract·url·source·score·created_at | ✅ |
+| topic당 Top-3 저장 | S2 job 성공 후 run_arxiv_recommendations_for_week → 3건 INSERT (누적) | ✅ |
+| GET /recommendations | GET /recommendations (week_start, topic_name, limit) | ✅ |
+| Android에서 조회 | Recommendations 탭에서 실 API 호출, 카드·Process·Remove | ✅ |
+| 후보 수집·embed·점수 | arXiv 검색 → S2 embedding으로 re-rank → Top 3 | ✅ (설계와 동일 방향) |
+| POST /jobs/recommendations | 없음. S2 job 한 번에 S2+추천 수행 (설계상 선택 구현) | ✅ (계획대로) |
 
 ---
 
@@ -41,18 +58,10 @@
 
 ### Option A — MVP v1.2 완주 (Week 8 → 9 → 10)
 
-1. **Week 8 — S2 Consolidation**
-   - **백엔드:** S2 배치 job (일/주 단위). 입력: 최근 S1 + (선택) notes + 이전 S2. topic 단위, scope=’topic’, kind=’S2’.
-   - **트리거:** POST /jobs/s2 또는 스케줄러에서 호출하는 내부 엔드포인트.
-   - **Exit:** 5~20개 토픽, 재생성 시 idempotent.
-
-2. **Week 9 — Weekly Recommendation**
-   - **스키마:** candidates / recommendations / rec_feedback 테이블 추가 (필요 시).
-   - **파이프라인:** S2 토픽 열거 → 쿼리 확장 → 후보 수집(arXiv/RSS 등) → embed+점수 → topic당 Top-3 → 저장.
-   - **API:** GET /recommendations 또는 기존 Android Recommendations를 실데이터로 연동.
-   - **Exit:** topic당 Top-3, Android에서 조회 가능.
-
-3. **Week 10 — MVP Closure**
+1. **Week 8 — S2 Consolidation** ✅ 완료
+2. **Week 9 — Weekly Recommendation** ✅ 완료  
+   - recommendations 테이블(52), S2 job 내 arXiv Top 3 생성·re-rank, GET/DELETE /recommendations, Android 실데이터 연동 완료.
+3. **Week 10 — MVP Closure** ❌ 미진입
    - 데모 시나리오 3가지 문서화 및 검증 (PDF→질의→답변, 다중 doc→S2, 주간 추천 노출).
    - latency / refine rate / cannot-answer rate 등 메트릭 스냅샷.
    - Post-MVP 백로그 정리.

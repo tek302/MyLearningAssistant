@@ -139,3 +139,60 @@ Respond in JSON only:
     # Should not reach here
     raise RuntimeError(f"Failed to create summary: {str(last_error)}")
 
+
+def create_s2_summary(combined_s1_text: str, max_retries: int = 2) -> Dict[str, Any]:
+    """
+    Create S2 (weekly/topic) summary from combined S1 tldr + bullets text.
+    One LLM call to produce a single tldr + 5--15 technical points for "this week".
+    """
+    if not HAS_OPENAI:
+        raise ValueError("OpenAI package is not installed. Install with: pip install openai")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
+    model = get_summary_model()
+    client = OpenAI(api_key=api_key)
+    prompt = f"""You are summarizing the key technical points from multiple documents read this week.
+Below is a concatenation of one-sentence summaries and bullet points from each document.
+
+Produce a single weekly summary in JSON:
+1. tldr: ONE short sentence (max 200 chars) capturing the main theme of the week's reading.
+2. bullets: Between 5 and 15 technical points that are the most important across all documents. Each point one short phrase or sentence.
+
+Combined document summaries:
+{combined_s1_text[:12000]}
+
+Respond in JSON only:
+{{
+  "tldr": "one sentence weekly summary",
+  "bullets": ["point 1", "point 2", "point 3", ...]
+}}"""
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant that creates concise technical summaries in JSON format."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3
+            )
+            content = response.choices[0].message.content
+            result = json.loads(content)
+            tldr = (result.get("tldr") or "").strip()[:300]
+            bullets = result.get("bullets", [])
+            if not isinstance(bullets, list):
+                bullets = []
+            bullets = [str(b).strip() for b in bullets if b][:15]
+            return {"tldr": tldr, "bullets": bullets}
+        except (json.JSONDecodeError, Exception) as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(2 ** attempt)
+            else:
+                raise RuntimeError(f"Failed to create S2 summary: {last_error}") from last_error
+    raise RuntimeError(f"Failed to create S2 summary: {last_error}")
+
+
