@@ -8,6 +8,8 @@ import kotlinx.coroutines.withContext
 
 private const val PREFS_NAME = "feed_refresh_hint"
 private const val KEY_REFRESH_FROM_SHARE_AT = "refresh_from_share_at"
+private const val KEY_PENDING_INGEST_JOB_ID = "pending_ingest_job_id"
+private const val KEY_PENDING_INGEST_JOB_IDS = "pending_ingest_job_ids"
 private const val KEY_KNOWN_DOCUMENT_IDS = "known_document_ids"
 private const val KEY_HIGHLIGHTED_DOCUMENT_IDS = "highlighted_document_ids"
 private const val REFRESH_FROM_SHARE_VALID_MS = 30 * 60 * 1000L // 30 minutes
@@ -36,6 +38,73 @@ object RefreshAndHighlightPrefs {
     suspend fun clearRefreshFromShareAt(context: Context) = withContext(Dispatchers.IO) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
             .remove(KEY_REFRESH_FROM_SHARE_AT)
+            .apply()
+    }
+
+    /** Pending ingest job_ids (from Share or Feed Send). Processed one by one; each removed when done/failed/timeout. */
+    suspend fun getPendingIngestJobIds(context: Context): List<String> = withContext(Dispatchers.IO) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        var list = prefs.getString(KEY_PENDING_INGEST_JOB_IDS, null)
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+        if (list.isEmpty()) {
+            val legacy = prefs.getString(KEY_PENDING_INGEST_JOB_ID, null)?.trim()?.takeIf { it.isNotEmpty() }
+            if (legacy != null) {
+                list = listOf(legacy)
+                prefs.edit()
+                    .putString(KEY_PENDING_INGEST_JOB_IDS, legacy)
+                    .remove(KEY_PENDING_INGEST_JOB_ID)
+                    .apply()
+            }
+        }
+        list
+    }
+
+    fun addPendingIngestJobIdSync(context: Context, jobId: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val current = prefs.getString(KEY_PENDING_INGEST_JOB_IDS, null)
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?.distinct()
+            ?: emptyList()
+        if (jobId in current) return
+        val next = (current + jobId).joinToString(",")
+        prefs.edit().putString(KEY_PENDING_INGEST_JOB_IDS, next).apply()
+    }
+
+    fun removePendingIngestJobIdSync(context: Context, jobId: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val current = prefs.getString(KEY_PENDING_INGEST_JOB_IDS, null)
+            ?.split(',')
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            ?: emptyList()
+        val next = current.filter { it != jobId }
+        if (next.isEmpty()) {
+            prefs.edit().remove(KEY_PENDING_INGEST_JOB_IDS).apply()
+        } else {
+            prefs.edit().putString(KEY_PENDING_INGEST_JOB_IDS, next.joinToString(",")).apply()
+        }
+    }
+
+    /** First pending job id, if any (for backward compat; prefer getPendingIngestJobIds). */
+    suspend fun getPendingIngestJobId(context: Context): String? = withContext(Dispatchers.IO) {
+        getPendingIngestJobIds(context).firstOrNull()
+    }
+
+    /** Appends job_id to pending list (Share or Feed Send). Replaces previous single-value behavior. */
+    fun setPendingIngestJobIdSync(context: Context, jobId: String) {
+        addPendingIngestJobIdSync(context, jobId)
+    }
+
+    /** Removes all pending ingest job ids. */
+    fun clearPendingIngestJobIdSync(context: Context) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .remove(KEY_PENDING_INGEST_JOB_ID)
+            .remove(KEY_PENDING_INGEST_JOB_IDS)
             .apply()
     }
 

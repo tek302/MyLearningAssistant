@@ -14,7 +14,8 @@ private val listType = object : TypeToken<List<DocumentsApi.DocumentItem>>() {}.
 
 /**
  * Local cache for the document list. Uses app-internal storage (no extra permissions).
- * Refresh from server only when user explicitly pulls to refresh or taps Refresh.
+ * On Feed load, when cache exists we do a quick server check (GET /documents include_summary=false);
+ * if first-page ids differ from cache we refresh with include_summary=true.
  */
 object DocumentsCache {
 

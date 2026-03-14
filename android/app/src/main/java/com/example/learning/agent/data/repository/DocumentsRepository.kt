@@ -26,7 +26,8 @@ object DocumentsRepository {
             val response = ApiClient.documentsApi.getDocuments(
                 limit = limit,
                 offset = offset,
-                include_summary = includeSummary
+                include_summary = includeSummary,
+                cacheBust = System.currentTimeMillis()
             )
             if (response.isSuccessful) {
                 val list = response.body()?.documents ?: emptyList()

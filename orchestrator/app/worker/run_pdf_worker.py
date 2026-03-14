@@ -443,6 +443,52 @@ def process_one(row: dict[str, Any]) -> bool:
         return False
 
 
+def process_pdf_bytes(
+    source_id: str,
+    user_id: str,
+    pdf_bytes: bytes,
+    title: str | None = None,
+) -> bool:
+    """
+    Process in-memory PDF bytes (e.g. from Storage): parse, chunk, embed, S1, mark_ready/mark_failed.
+    Used for source_type=pdf_file. No URL fetch, no arXiv title. Returns True if ready, False if failed.
+    """
+    existing_title = (title or "").strip()
+    log_ctx = f"source_id={source_id} pdf_file"
+    repo = SupabaseRepo()
+    try:
+        size_mb = len(pdf_bytes) / (1024.0 * 1024.0)
+        if size_mb > MAX_PDF_MB:
+            raise ValueError(FAIL_TOO_LARGE)
+        text: str
+        pages: int
+        meta: dict[str, Any]
+        text, pages, meta = parse_pdf(pdf_bytes)
+        if not existing_title and meta and (meta.get("title") or "").strip():
+            pdf_title = (meta.get("title") or "").strip()
+            repo.update_source(source_id, title=pdf_title)
+            existing_title = pdf_title
+            logger.info("%s title set from PDF metadata: %s", log_ctx, pdf_title[:60])
+        char_count = len(text)
+        chunks_list = chunk_text(text)
+        _persist_chunks_and_embeddings(source_id, chunks_list)
+        _create_s1_summary_for_source(user_id, source_id)
+        mark_ready(source_id, pages=pages, size_mb=size_mb, char_count=char_count, chunks_count=len(chunks_list))
+        logger.info("%s ready pages=%s size_mb=%.2f chunks=%s", log_ctx, pages, size_mb, len(chunks_list))
+        return True
+    except ValueError as e:
+        fail_code = str(e)
+        if fail_code not in (FAIL_TOO_LARGE, FAIL_TOO_LONG, FAIL_NO_TEXT):
+            fail_code = "PDF_PARSE_ERROR"
+        logger.warning("%s failed fail_code=%s", log_ctx, fail_code)
+        mark_failed(source_id, fail_code)
+        return False
+    except Exception as e:
+        logger.exception("%s error: %s", log_ctx, e)
+        mark_failed(source_id, "PDF_PROCESS_ERROR")
+        return False
+
+
 _shutdown = False
 
 

@@ -15,12 +15,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.models.Recommendation
+import com.example.learning.agent.data.repository.FeedbackRepository
 import com.example.learning.agent.data.repository.IngestRepository
 import com.example.learning.agent.data.repository.RecommendationsRepository
+import com.example.learning.agent.ui.components.FeedbackBottomSheet
 import com.example.learning.agent.ui.components.RecommendationCard
 import com.example.learning.agent.ui.theme.TekLearningAgentTheme
 import kotlinx.coroutines.launch
 import java.util.Calendar
+
+private data class RecommendationFeedbackDraft(
+    val recommendation: Recommendation,
+    val action: String,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -35,6 +42,9 @@ fun RecommendationsScreen(
     var loadError by remember { mutableStateOf<String?>(null) }
     var processInProgress by remember { mutableStateOf<String?>(null) }
     var removeInProgress by remember { mutableStateOf<String?>(null) }
+    var feedbackDraft by remember { mutableStateOf<RecommendationFeedbackDraft?>(null) }
+    var feedbackByRecommendationId by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var feedbackSubmittingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -207,6 +217,18 @@ fun RecommendationsScreen(
                         items(recommendations) { rec ->
                             RecommendationCard(
                                 recommendation = rec,
+                                onThumbsUp = {
+                                    if (rec.id !in feedbackSubmittingIds) {
+                                        feedbackDraft = RecommendationFeedbackDraft(rec, FeedbackRepository.ACTION_THUMBS_UP)
+                                    }
+                                },
+                                onThumbsDown = {
+                                    if (rec.id !in feedbackSubmittingIds) {
+                                        feedbackDraft = RecommendationFeedbackDraft(rec, FeedbackRepository.ACTION_THUMBS_DOWN)
+                                    }
+                                },
+                                feedbackAction = feedbackByRecommendationId[rec.id],
+                                feedbackSubmitting = rec.id in feedbackSubmittingIds,
                                 onProcess = {
                                     if (processInProgress == rec.id) return@RecommendationCard
                                     processInProgress = rec.id
@@ -248,6 +270,53 @@ fun RecommendationsScreen(
                 }
             }
         }
+    }
+    if (feedbackDraft != null) {
+        val draft = feedbackDraft!!
+        FeedbackBottomSheet(
+            title = if (draft.action == FeedbackRepository.ACTION_THUMBS_UP) {
+                "What did you like?"
+            } else {
+                "What was off?"
+            },
+            reasons = FeedbackRepository.RECOMMENDATION_REASONS,
+            onDismiss = { feedbackDraft = null },
+            onSubmit = { reasons, comment ->
+                val previous = feedbackByRecommendationId[draft.recommendation.id]
+                feedbackByRecommendationId = feedbackByRecommendationId + (draft.recommendation.id to draft.action)
+                feedbackSubmittingIds = feedbackSubmittingIds + draft.recommendation.id
+                feedbackDraft = null
+                scope.launch {
+                    when (val result = FeedbackRepository.submit(
+                        targetType = FeedbackRepository.TARGET_RECOMMENDATION,
+                        targetId = draft.recommendation.id,
+                        action = draft.action,
+                        reasons = reasons,
+                        comment = comment,
+                        weekStart = draft.recommendation.weekStart,
+                        meta = mapOf(
+                            "title" to draft.recommendation.title,
+                            "url" to draft.recommendation.url,
+                            "source" to draft.recommendation.source,
+                            "topic_name" to draft.recommendation.topicName,
+                            "week_start" to draft.recommendation.weekStart,
+                        )
+                    )) {
+                        is FeedbackRepository.Result.Success ->
+                            snackbarHostState.showSnackbar("Feedback saved")
+                        is FeedbackRepository.Result.Error -> {
+                            feedbackByRecommendationId = if (previous == null) {
+                                feedbackByRecommendationId - draft.recommendation.id
+                            } else {
+                                feedbackByRecommendationId + (draft.recommendation.id to previous)
+                            }
+                            snackbarHostState.showSnackbar("Could not save feedback: ${result.message}")
+                        }
+                    }
+                    feedbackSubmittingIds = feedbackSubmittingIds - draft.recommendation.id
+                }
+            }
+        )
     }
     }
 }

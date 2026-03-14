@@ -1,6 +1,9 @@
 package com.example.learning.agent.ui.components
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -13,6 +16,10 @@ fun WeeklySummaryCard(
     summary: S2Api.S2SummaryItem,
     onOpen: () -> Unit,
     onReprocess: () -> Unit,
+    onThumbsUp: () -> Unit = {},
+    onThumbsDown: () -> Unit = {},
+    feedbackAction: String? = null,
+    feedbackSubmitting: Boolean = false,
     isReprocessing: Boolean = false,
     modifier: Modifier = Modifier
 ) {
@@ -77,6 +84,32 @@ fun WeeklySummaryCard(
                 )
             }
             Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                if (feedbackSubmitting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                IconButton(onClick = onThumbsUp, enabled = !feedbackSubmitting) {
+                    Icon(
+                        imageVector = Icons.Default.ThumbUp,
+                        contentDescription = "Helpful summary",
+                        tint = if (feedbackAction == "thumbs_up") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onThumbsDown, enabled = !feedbackSubmitting) {
+                    Icon(
+                        imageVector = Icons.Default.ThumbDown,
+                        contentDescription = "Not helpful summary",
+                        tint = if (feedbackAction == "thumbs_down") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)

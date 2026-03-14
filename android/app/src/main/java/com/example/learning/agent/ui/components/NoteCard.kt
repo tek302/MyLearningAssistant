@@ -9,9 +9,13 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -24,6 +28,7 @@ import com.example.learning.agent.data.models.Note
 @Composable
 fun NoteCard(
     note: Note,
+    onDelete: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -37,12 +42,32 @@ fun NoteCard(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            // Title
-            Text(
-                text = note.title,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
+            // Title row with optional delete
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+            ) {
+                Text(
+                    text = note.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(bottom = 8.dp)
+                )
+                if (onDelete != null && !note.id.startsWith("pending-")) {
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Delete note",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
 
             // Content
             Text(
@@ -69,20 +94,30 @@ fun NoteCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Meta: source and date
+            // Meta: Free note / document and date
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                if (note.source != null) {
-                    Text(
+                when {
+                    note.isFreeNote -> Text(
+                        text = "Free note",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    note.documentTitle != null -> Text(
+                        text = note.documentTitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    note.source != null -> Text(
                         text = note.source,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
                 Text(
-                    text = note.createdAt,
+                    text = if (note.id.startsWith("pending-")) "Saving…" else note.createdAt,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

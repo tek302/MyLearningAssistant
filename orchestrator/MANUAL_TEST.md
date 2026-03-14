@@ -42,6 +42,58 @@ curl -s -X POST "http://127.0.0.1:8000/ingest" `
 
 **예상 응답:** `{"job_id":"<uuid>","status":"queued"}`
 
+### 1b) POST /ingest/file (Local PDF — multipart)
+
+로컬 PDF 파일을 업로드해 ingest하는 플로우. **서버를 띄운 뒤** 같은 터미널(또는 터미널 2)에서 실행.
+
+**유저 헷갈리지 않게:**  
+- 아래 예시는 모두 `Authorization: Bearer dev-user` 를 씁니다.  
+- 서버에 `AUTH_BYPASS_USER_ID=dev-user` 를 설정해 두면, 이 요청은 **dev-user** 한 계정으로만 들어갑니다.  
+- 실제 앱에서는 Firebase 로그인한 유저만 사용하고, 프로덕션에서는 `AUTH_BYPASS_USER_ID`를 설정하지 않으므로 **dev-user는 로컬 테스트 전용**입니다.  
+- 로컬 테스트 시에는 항상 **dev-user** 로 통일하면, 나중에 앱에서 같은 계정(또는 테스트용 Firebase 유저)으로 로그인했을 때만 해당 문서가 보입니다.
+
+**PowerShell (Windows):**  
+`Invoke-RestMethod -Form` 은 PowerShell 7 이상에서만 지원됩니다. Windows PowerShell 5.1에서는 **curl.exe** 를 쓰세요 (Windows 10+에 포함).
+
+```powershell
+$env:AUTH_BYPASS_USER_ID = "dev-user"
+$pdfPath = "C:\Users\taekh\Downloads\test_medium.PDF"
+curl.exe -s -X POST "http://127.0.0.1:8000/ingest/file" `
+  -H "Authorization: Bearer dev-user" `
+  -F "file=@$pdfPath" `
+  -F "title=Local test PDF"
+```
+
+응답이 `{"job_id":"...","status":"queued"}` 형태로 나오면 성공. `<job_id>` 를 복사해 아래 2)번처럼 폴링하면 됩니다.
+
+**PowerShell 7+** 에서는 `-Form` 을 쓸 수 있습니다:
+
+```powershell
+$r = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/ingest/file" `
+  -Headers @{ Authorization = "Bearer dev-user" } `
+  -Form @{ file = Get-Item -Path $pdfPath; title = "Local test PDF" }
+$r.job_id
+```
+
+**curl (Git Bash 또는 WSL):**
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/ingest/file" \
+  -H "Authorization: Bearer dev-user" \
+  -F "file=@/path/to/sample.pdf" \
+  -F "title=Local test PDF"
+```
+
+**예상 응답:** `{"job_id":"<uuid>","status":"queued"}`  
+이후 **1)번과 동일하게** GET /ingest/status?job_id=... 로 폴링하면 됩니다.
+
+**앱·서버 없이 스크립트로만 테스트 (S2 / recommendation 처럼):**  
+- `scripts/run_ingest_file_local.py` 를 사용하면 **서버를 띄우지 않고** 로컬 PDF 파일 → Storage 업로드 → job 생성 → process_job 까지 한 번에 돌립니다.  
+- **유저 헷갈리지 않게:** 스크립트는 전용 테스트 유저 **`local-pdf-test`** 를 사용합니다.  
+  - 이 유저로 들어간 문서는 **앱에서 실제 계정(Firebase)으로 로그인하면 보이지 않습니다.**  
+  - 테스트 데이터가 실제 유저와 섞이지 않으려면 이 스크립트만 쓰고, curl/앱 테스트는 **dev-user** 로 하면 됩니다.  
+- 사용법은 아래 "Local PDF Ingest 로컬 스크립트 테스트" 참고.
+
 ### 2) Poll GET /ingest/status?job_id=...
 
 `<job_id>`를 위 응답의 job_id로 교체:
@@ -256,6 +308,48 @@ Invoke-WebRequest -Uri "https://en.wikipedia.org/wiki/FastAPI" -UseBasicParsing 
 #### 5. 방화벽/프록시 확인
 
 회사 네트워크나 방화벽이 Supabase 호스트나 Wikipedia를 차단하는지 확인하세요.
+
+## Local PDF Ingest 로컬 스크립트 테스트 (앱·서버 없이)
+
+S2의 `scripts/run_s2_local.py` 처럼, **서버를 띄우지 않고** Local PDF ingest 파이프라인만 로컬에서 돌리고 싶을 때 사용합니다.
+
+### 전제 조건
+
+- `orchestrator/.env` 에 **DATABASE_URL**(또는 SUPABASE_DB_URL), **SUPABASE_URL**, **SUPABASE_SERVICE_ROLE_KEY**, **INGEST_STORAGE_BUCKET**(선택, 기본 `ingest-files`) 설정.
+- Supabase Storage 버킷 생성 및 정책 설정 완료.
+- 테스트할 **PDF 파일 경로** 하나 준비.
+
+### 유저 헷갈리지 않게
+
+- 스크립트는 **고정 user_id `local-pdf-test`** 를 사용합니다.
+- 이 유저는 **앱에서 Firebase로 로그인한 실제 계정과 다릅니다.** 따라서:
+  - 스크립트로 넣은 문서는 **앱 문서 목록에는 안 보입니다** (실제 로그인 계정과 별개).
+  - 테스트 데이터가 프로덕션/실제 유저와 섞이지 않습니다.
+- 정리하고 싶다면 DB에서 `user_id = (SELECT id FROM users WHERE firebase_uid = 'local-pdf-test')` 인 source/document만 삭제하면 됩니다 (또는 해당 유저를 삭제).
+
+### 실행 방법
+
+`orchestrator` 디렉토리에서:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python scripts/run_ingest_file_local.py C:\path\to\sample.pdf
+```
+
+또는 (제목 지정):
+
+```powershell
+python scripts/run_ingest_file_local.py C:\path\to\sample.pdf "My test document"
+```
+
+### 동작
+
+1. `.env` 로드 후 DB/Storage 설정 확인.
+2. **local-pdf-test** 유저로 source(pdf_file) + job 생성, Storage에 PDF 업로드, meta 업데이트.
+3. **process_job(job_id)** 를 동기로 호출 → 파싱·chunk·embed·S1·Storage 삭제까지 수행.
+4. 성공 시 `Done. source_id=...` 출력; 실패 시 에러 메시지 출력.
+
+---
 
 ## 주의사항
 

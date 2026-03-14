@@ -202,3 +202,17 @@ def get_graph_recursion_limit() -> int:
         pass
     return 50
 
+
+def get_supabase_url() -> Optional[str]:
+    """Supabase project URL for Storage API (e.g. https://xxx.supabase.co). None if not set."""
+    return (os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_SERVICE_URL") or "").strip() or None
+
+
+def get_supabase_service_key() -> Optional[str]:
+    """Supabase service_role key for server-side Storage (upload/delete). None if not set."""
+    return (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY") or "").strip() or None
+
+
+def get_ingest_storage_bucket() -> str:
+    """Bucket name for PDF ingest files. Default ingest-files."""
+    return (os.getenv("INGEST_STORAGE_BUCKET") or "ingest-files").strip()

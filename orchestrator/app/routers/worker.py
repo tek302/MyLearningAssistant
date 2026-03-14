@@ -15,6 +15,7 @@ from app.worker.job_runner import process_job
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/worker", tags=["worker"])
+STALE_RUNNING_JOB_MAX_AGE_MINUTES = 15
 
 
 def _week_start_monday(dt: datetime) -> str:
@@ -31,6 +32,23 @@ def _check_worker_secret(request: Request) -> None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
 
+def _cleanup_stale_jobs(repo: SupabaseRepo, limit: int = 1) -> list[dict]:
+    """Clean a small number of stale running jobs before processing new work."""
+    try:
+        max_age_minutes = int(os.getenv("STALE_RUNNING_JOB_MAX_AGE_MINUTES", str(STALE_RUNNING_JOB_MAX_AGE_MINUTES)))
+    except ValueError:
+        max_age_minutes = STALE_RUNNING_JOB_MAX_AGE_MINUTES
+    cleaned = repo.cleanup_stale_running_jobs(max_age_minutes=max_age_minutes, limit=limit)
+    if cleaned:
+        logger.warning(
+            "worker: cleaned stale running jobs count=%d max_age_minutes=%d jobs=%s",
+            len(cleaned),
+            max_age_minutes,
+            cleaned,
+        )
+    return cleaned
+
+
 @router.post("/tick")
 async def worker_tick(request: Request):
     """
@@ -40,12 +58,29 @@ async def worker_tick(request: Request):
     """
     _check_worker_secret(request)
     repo = SupabaseRepo()
+    cleaned = _cleanup_stale_jobs(repo, limit=1)
     job_id = repo.claim_one_queued_job()
     if job_id:
         logger.info("worker_tick: claimed job_id=%s", job_id)
         await process_job(job_id)
-        return {"status": "ok", "processed": True, "job_id": job_id}
-    return {"status": "ok", "processed": False}
+        return {"status": "ok", "processed": True, "job_id": job_id, "cleaned_stale_jobs": cleaned}
+    return {"status": "ok", "processed": False, "cleaned_stale_jobs": cleaned}
+
+
+@router.post("/cleanup-stale-jobs")
+async def cleanup_stale_jobs(
+    request: Request,
+    limit: int = 10,
+):
+    """
+    Mark stale running jobs as failed.
+    For Cloud Scheduler or manual recovery when jobs were left running after a crash.
+    Same auth as /worker/tick.
+    """
+    _check_worker_secret(request)
+    repo = SupabaseRepo()
+    cleaned = _cleanup_stale_jobs(repo, limit=max(1, min(limit, 100)))
+    return {"status": "ok", "cleaned_count": len(cleaned), "jobs": cleaned}
 
 
 @router.post("/s2-schedule")

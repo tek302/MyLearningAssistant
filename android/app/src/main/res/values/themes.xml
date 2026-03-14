@@ -2,4 +2,12 @@
 <resources>
 
     <style name="Theme.TekLearningAgent" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <!-- Used when handling Share intent: fully transparent so no black flash; activity finishes after queuing. -->
+    <style name="Theme.TekLearningAgent.Translucent" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
 </resources>

@@ -1,8 +1,10 @@
 """
 GET /ingest/status?job_id=...: job state for async ingest (Week6).
 1 DB connection per request (resolve user + job SELECT in same connection).
+Returns state, progress, source_id, error (full message), error_code (simple code for 403/404/timeout).
 """
 import asyncio
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -11,6 +13,21 @@ from ..db.pool import resolve_user_id, with_connection
 from ..utils.deps import get_user_id
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
+logger = logging.getLogger(__name__)
+
+
+def _error_code_from_message(error: str | None) -> str | None:
+    """Derive simple error_code from error message for client (403, 404, timeout)."""
+    if not error:
+        return None
+    err = error.lower()
+    if "403" in err:
+        return "fetch_403"
+    if "404" in err:
+        return "fetch_404"
+    if "timeout" in err or "timed out" in err:
+        return "timeout"
+    return "unknown"
 
 
 def _get_job_status_for_user(user_id: str, job_id: str):
@@ -28,6 +45,25 @@ def _get_job_status_for_user(user_id: str, job_id: str):
             )
             row = cur.fetchone()
             if not row:
+                # Debug: check if job exists at all (any user) to distinguish 404 causes
+                cur.execute(
+                    "SELECT id, user_id FROM jobs WHERE id = %s",
+                    (job_id,),
+                )
+                any_row = cur.fetchone()
+                if any_row:
+                    logger.warning(
+                        "ingest_status: job_id=%s found but user_id mismatch (resolved_user=%s, job_owner=%s)",
+                        job_id,
+                        user_uuid,
+                        any_row[1],
+                    )
+                else:
+                    logger.warning(
+                        "ingest_status: job_id=%s not found in DB (resolved_user=%s)",
+                        job_id,
+                        user_uuid,
+                    )
                 return None
             cols = [d[0] for d in cur.description]
             out = dict(zip(cols, row))
@@ -43,17 +79,23 @@ async def get_ingest_status(
     job_id: str = Query(..., description="Job ID from POST /ingest"),
 ):
     """
-    Return job state: { state, progress, source_id, error? }.
+    Return job state: { state, progress, source_id, error?, error_code? }.
+    error_code is one of fetch_403, fetch_404, timeout, unknown (only when error is set).
     Ownership enforced: job must belong to current user.
     """
     if not job_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="job_id required")
+    logger.info("ingest_status: request job_id=%s user_id=%s", job_id, user_id)
     job = await asyncio.to_thread(_get_job_status_for_user, user_id, job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    return {
+    error = job.get("error")
+    out = {
         "state": job.get("state", "queued"),
         "progress": job.get("progress", 0),
         "source_id": job.get("source_id"),
-        "error": job.get("error"),
+        "error": error,
     }
+    if error:
+        out["error_code"] = _error_code_from_message(error)
+    return out

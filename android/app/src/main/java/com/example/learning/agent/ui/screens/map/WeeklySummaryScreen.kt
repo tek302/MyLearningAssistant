@@ -11,12 +11,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.remote.S2Api
+import com.example.learning.agent.data.repository.FeedbackRepository
 import com.example.learning.agent.data.repository.S2Cache
 import com.example.learning.agent.data.repository.S2Repository
 import com.example.learning.agent.data.repository.TriggerRepository
+import com.example.learning.agent.ui.components.FeedbackBottomSheet
 import com.example.learning.agent.ui.components.WeeklySummaryCard
 import com.example.learning.agent.ui.theme.TekLearningAgentTheme
 import kotlinx.coroutines.launch
+
+private data class SummaryFeedbackDraft(
+    val summary: S2Api.S2SummaryItem,
+    val action: String,
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -29,6 +36,9 @@ fun WeeklySummaryScreen(
     var isRefreshing by remember { mutableStateOf(false) }
     var loadError by remember { mutableStateOf<String?>(null) }
     var reprocessingId by remember { mutableStateOf<String?>(null) }
+    var feedbackDraft by remember { mutableStateOf<SummaryFeedbackDraft?>(null) }
+    var feedbackBySummaryId by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var feedbackSubmittingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current.applicationContext
@@ -181,6 +191,18 @@ fun WeeklySummaryScreen(
                                     summary = summary,
                                     onOpen = { onOpenSummary(summary.id) },
                                     onReprocess = { doReprocess(summary) },
+                                    onThumbsUp = {
+                                        if (summary.id !in feedbackSubmittingIds) {
+                                            feedbackDraft = SummaryFeedbackDraft(summary, FeedbackRepository.ACTION_THUMBS_UP)
+                                        }
+                                    },
+                                    onThumbsDown = {
+                                        if (summary.id !in feedbackSubmittingIds) {
+                                            feedbackDraft = SummaryFeedbackDraft(summary, FeedbackRepository.ACTION_THUMBS_DOWN)
+                                        }
+                                    },
+                                    feedbackAction = feedbackBySummaryId[summary.id],
+                                    feedbackSubmitting = summary.id in feedbackSubmittingIds,
                                     isReprocessing = reprocessingId == summary.id
                                 )
                             }
@@ -189,5 +211,51 @@ fun WeeklySummaryScreen(
                 }
             }
         }
+    }
+
+    if (feedbackDraft != null) {
+        val draft = feedbackDraft!!
+        FeedbackBottomSheet(
+            title = if (draft.action == FeedbackRepository.ACTION_THUMBS_UP) {
+                "What worked well?"
+            } else {
+                "What should improve?"
+            },
+            reasons = FeedbackRepository.SUMMARY_S2_REASONS,
+            onDismiss = { feedbackDraft = null },
+            onSubmit = { reasons, comment ->
+                val previous = feedbackBySummaryId[draft.summary.id]
+                feedbackBySummaryId = feedbackBySummaryId + (draft.summary.id to draft.action)
+                feedbackSubmittingIds = feedbackSubmittingIds + draft.summary.id
+                feedbackDraft = null
+                scope.launch {
+                    when (val result = FeedbackRepository.submit(
+                        targetType = FeedbackRepository.TARGET_SUMMARY_S2,
+                        targetId = draft.summary.id,
+                        action = draft.action,
+                        reasons = reasons,
+                        comment = comment,
+                        weekStart = draft.summary.extra?.weekStart,
+                        meta = mapOf(
+                            "topic_name" to draft.summary.extra?.topicName,
+                            "week_start" to draft.summary.extra?.weekStart,
+                            "tldr" to draft.summary.tldr,
+                        )
+                    )) {
+                        is FeedbackRepository.Result.Success ->
+                            snackbarHostState.showSnackbar("Feedback saved")
+                        is FeedbackRepository.Result.Error -> {
+                            feedbackBySummaryId = if (previous == null) {
+                                feedbackBySummaryId - draft.summary.id
+                            } else {
+                                feedbackBySummaryId + (draft.summary.id to previous)
+                            }
+                            snackbarHostState.showSnackbar("Could not save feedback: ${result.message}")
+                        }
+                    }
+                    feedbackSubmittingIds = feedbackSubmittingIds - draft.summary.id
+                }
+            }
+        )
     }
 }

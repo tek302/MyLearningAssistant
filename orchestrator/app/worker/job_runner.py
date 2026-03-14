@@ -99,6 +99,33 @@ async def process_job(job_id: str) -> None:
             # process_one already set sources.status='failed'
         return
 
+    if source_type == "pdf_file":
+        repo.update_job(job_id, state="running", progress=10)
+        repo.update_source(source_id, status="running")
+        meta = source.get("meta") or {}
+        storage_path = (meta.get("storage_path") or "").strip()
+        if not storage_path:
+            repo.update_job(job_id, state="failed", error="pdf_file source missing meta.storage_path")
+            repo.update_source(source_id, status="failed", fail_code="MISSING_STORAGE_PATH")
+            return
+        from app.services.storage import delete_pdf, get_pdf
+        from app.worker.run_pdf_worker import process_pdf_bytes
+
+        try:
+            pdf_bytes = await asyncio.to_thread(get_pdf, storage_path)
+        except (FileNotFoundError, RuntimeError) as e:
+            repo.update_job(job_id, state="failed", error=str(e)[:500])
+            repo.update_source(source_id, status="failed", fail_code="STORAGE_FETCH_FAILED")
+            return
+        title = (source.get("title") or meta.get("original_filename") or "").strip()
+        ok = await asyncio.to_thread(process_pdf_bytes, source_id, user_id, pdf_bytes, title or None)
+        if ok:
+            await asyncio.to_thread(delete_pdf, storage_path)
+            repo.update_job(job_id, state="done", progress=100)
+        else:
+            repo.update_job(job_id, state="failed", error="PDF processing failed")
+        return
+
     if source_type == "url":
         repo.update_job(job_id, state="running", progress=10)
         repo.update_source(source_id, status="running")
@@ -123,8 +150,17 @@ async def process_job(job_id: str) -> None:
             repo.update_job(job_id, state="done", progress=100)
             repo.update_source(source_id, status="done")
         except Exception as e:
-            logger.exception("job_id=%s url ingest failed: %s", job_id, e)
-            repo.update_job(job_id, state="failed", error=str(e))
+            err_msg = str(e)
+            # Log type and message first so they are visible even if traceback is truncated
+            logger.error(
+                "job_id=%s url ingest failed: type=%s message=%s",
+                job_id,
+                type(e).__name__,
+                err_msg[:500] + ("..." if len(err_msg) > 500 else ""),
+            )
+            logger.exception("job_id=%s url ingest full traceback", job_id)
+            # Store truncated error for job/source (DB column may have limit)
+            repo.update_job(job_id, state="failed", error=err_msg[:2000] if len(err_msg) > 2000 else err_msg)
             repo.update_source(source_id, status="failed", fail_code="URL_INGEST_ERROR")
         return
 

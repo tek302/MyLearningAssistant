@@ -6,15 +6,18 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.example.learning.agent.data.repository.DocumentsRepository
+import com.example.learning.agent.ui.screens.feed.IngestFailureInfo
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.rememberNavController
@@ -31,11 +34,26 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        val isShareIntent = intent?.action == Intent.ACTION_SEND && intent.type == "text/plain"
+        if (isShareIntent) {
+            setTheme(com.example.learning.agent.R.style.Theme_TekLearningAgent_Translucent)
+        }
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-        val sharedUrl = consumeSendIntentUrl(intent)
-        if (sharedUrl != null) {
-            runHeadlessIngest(sharedUrl)
+        if (isShareIntent) {
+            window.setBackgroundDrawableResource(android.R.color.transparent)
+            // Skip enableEdgeToEdge so we don't introduce a solid background (avoids black flash).
+        } else {
+            enableEdgeToEdge()
+        }
+        val shared = consumeSendIntentUrl(intent)
+        if (shared != null) {
+            runHeadlessIngest(shared.first, shared.second)
+            return
+        }
+        if (isShareIntent) {
+            // Had share intent but no URL could be extracted (e.g. user shared plain text).
+            Toast.makeText(this, "No link found in shared text", Toast.LENGTH_SHORT).show()
+            finish()
             return
         }
         setContent {
@@ -48,46 +66,72 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        val sharedUrl = consumeSendIntentUrl(intent)
-        if (sharedUrl != null) {
-            runHeadlessIngest(sharedUrl)
+        val shared = consumeSendIntentUrl(intent)
+        if (shared != null) {
+            runHeadlessIngest(shared.first, shared.second)
         }
     }
 
-    /** Returns URL if this was a SEND intent with text, and consumes the intent. */
-    private fun consumeSendIntentUrl(intent: Intent?): String? {
+    /** Returns (url, title?) if this was a SEND intent with text, and consumes the intent.
+     * Many apps (e.g. Chrome) send "Page Title https://url" as EXTRA_TEXT; we extract the URL
+     * so the backend does not receive the whole string as the URL (which causes "No connection
+     * adapters" when fetching). */
+    private fun consumeSendIntentUrl(intent: Intent?): Pair<String, String?>? {
         if (intent?.action != Intent.ACTION_SEND || intent.type != "text/plain") return null
-        val url = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()?.takeIf { it.isNotEmpty() }
+        val raw = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         setIntent(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER))
-        return url
+        val (url, title) = extractUrlFromSharedText(raw)
+        return url?.let { Pair(it, title) }
     }
 
-    /** Queue ingest and finish so user returns to the app they shared from (e.g. Chrome). */
-    private fun runHeadlessIngest(url: String) {
+    /**
+     * Extracts a single URL from shared text. Many share targets send "Title https://example.com"
+     * or "Title\nhttps://example.com". Returns (url, title) or (null, null) if no URL found.
+     */
+    private fun extractUrlFromSharedText(text: String): Pair<String?, String?> {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return null to null
+        val urlPattern = Regex("https?://\\S+")
+        val match = urlPattern.find(trimmed) ?: return null to null
+        val url = match.value
+        // If the whole string is just the URL, no title
+        if (trimmed == url) return url to null
+        val before = trimmed.substring(0, match.range.first).trim()
+        val title = before.takeIf { it.isNotEmpty() }
+        return url to title
+    }
+
+    /**
+     * HEADLESS SHARE MODE — keep this behavior when changing code:
+     * - Do NOT wait for the network. Show Toast, start ingest in applicationScope, then finish() immediately.
+     * - If we waited for ingest to complete (e.g. lifecycleScope.launch { ... finish() }), the activity
+     *   would stay visible and the user would see our app (or a black/transparent flash) until the request returns.
+     * - By finishing immediately, the user stays in the source app (e.g. Chrome); only the Toast is visible.
+     * - Ingest runs in TekLearningAgentApp.applicationScope so it continues after finish(). On success we save
+     *   job_id to prefs; the user sees the result when they open the app and go to Feed (polling there).
+     * Do not replace with lifecycleScope or add setContent/UI for the Share path.
+     */
+    private fun runHeadlessIngest(url: String, title: String? = null) {
         if (FirebaseAuth.getInstance().currentUser == null) {
             Toast.makeText(this, "Sign in to add documents", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
-        setContent {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Adding document…", style = MaterialTheme.typography.bodyLarge)
-            }
-        }
-        lifecycleScope.launch {
-            val result = withContext(Dispatchers.IO) { IngestRepository.ingestUrl(url) }
+        Toast.makeText(applicationContext, "Queued. Open the app and check Feed for the result.", Toast.LENGTH_SHORT).show()
+        (application as? TekLearningAgentApp)?.applicationScope?.launch {
+            val result = withContext(Dispatchers.IO) { IngestRepository.ingestUrl(url, title) }
             withContext(Dispatchers.Main) {
                 when (result) {
                     is IngestRepository.Result.Success -> {
+                        RefreshAndHighlightPrefs.setPendingIngestJobIdSync(applicationContext, result.jobId)
                         RefreshAndHighlightPrefs.setRefreshFromShareAtSync(applicationContext)
-                        Toast.makeText(this@MainActivity, "Added to your documents", Toast.LENGTH_SHORT).show()
                     }
                     is IngestRepository.Result.Error ->
-                        Toast.makeText(this@MainActivity, "Error: ${result.message}", Toast.LENGTH_LONG).show()
+                        Toast.makeText(applicationContext, "Error: ${result.message}", Toast.LENGTH_LONG).show()
                 }
-                finish()
             }
         }
+        finish()
     }
 }
 
@@ -116,6 +160,11 @@ fun MainScreen(
     val currentRoute = getCurrentRoute(navController)
     var selectedDocumentId by remember { mutableStateOf<String?>(null) }
     var selectedDocumentTitle by remember { mutableStateOf<String?>(null) }
+    // Ingest failure queue and dialog at MainScreen so the popup is always visible (any tab, any recomposition).
+    var ingestFailureQueue by remember { mutableStateOf<List<IngestFailureInfo>>(emptyList()) }
+    var refreshFeedTrigger by remember { mutableStateOf(0) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current.applicationContext
 
     // Determine if bottom nav should be shown (hide on detail screens)
     val showBottomNav = currentRoute in bottomNavItems.map { it.route }
@@ -206,7 +255,59 @@ fun MainScreen(
                     restoreState = true
                 }
             },
+            addIngestFailure = { info ->
+                if (info.sourceId == null || !ingestFailureQueue.any { it.sourceId == info.sourceId }) {
+                    ingestFailureQueue = ingestFailureQueue + info
+                }
+            },
+            refreshFeedTrigger = refreshFeedTrigger,
+            onRefreshDone = { refreshFeedTrigger = 0 },
             modifier = Modifier.padding(paddingValues)
+        )
+    }
+
+    // Ingest failure dialog at root so it always shows (foreground, any tab). OK → delete doc, clear pending job when jobId present, trigger feed refresh.
+    if (ingestFailureQueue.isNotEmpty()) {
+        val info = ingestFailureQueue.first()
+        val context = LocalContext.current.applicationContext
+        AlertDialog(
+            onDismissRequest = { ingestFailureQueue = ingestFailureQueue.drop(1) },
+            title = { Text("Ingest failed") },
+            text = {
+                Column {
+                    Text(info.message)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        "You can try uploading as PDF instead.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        info.jobId?.let { jobId ->
+                            RefreshAndHighlightPrefs.removePendingIngestJobIdSync(context, jobId)
+                        }
+                        info.sourceId?.let { id ->
+                            when (val r = DocumentsRepository.deleteDocument(id)) {
+                                is DocumentsRepository.Result.Success -> {
+                                    if (id == selectedDocumentId) {
+                                        selectedDocumentId = null
+                                        selectedDocumentTitle = null
+                                    }
+                                }
+                                is DocumentsRepository.Result.Error -> { /* could show snackbar from here if we had host state */ }
+                            }
+                        }
+                        refreshFeedTrigger++
+                        ingestFailureQueue = ingestFailureQueue.drop(1)
+                    }
+                }) {
+                    Text("OK")
+                }
+            }
         )
     }
 }

@@ -5,6 +5,8 @@ import android.net.Uri
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.ThumbDown
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,6 +20,10 @@ fun RecommendationCard(
     recommendation: Recommendation,
     onProcess: () -> Unit = {},
     onRemove: () -> Unit = {},
+    onThumbsUp: () -> Unit = {},
+    onThumbsDown: () -> Unit = {},
+    feedbackAction: String? = null,
+    feedbackSubmitting: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -84,6 +90,36 @@ fun RecommendationCard(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Original", style = MaterialTheme.typography.labelMedium)
                     }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (feedbackSubmitting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                IconButton(onClick = onThumbsUp, enabled = !feedbackSubmitting) {
+                    Icon(
+                        imageVector = Icons.Default.ThumbUp,
+                        contentDescription = "Helpful recommendation",
+                        tint = if (feedbackAction == "thumbs_up") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = onThumbsDown, enabled = !feedbackSubmitting) {
+                    Icon(
+                        imageVector = Icons.Default.ThumbDown,
+                        contentDescription = "Not helpful recommendation",
+                        tint = if (feedbackAction == "thumbs_down") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 

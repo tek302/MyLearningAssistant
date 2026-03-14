@@ -12,6 +12,7 @@ import androidx.navigation.navArgument
 import com.example.learning.agent.ui.screens.ask.AskScreen
 import com.example.learning.agent.ui.screens.feed.FeedDetailScreen
 import com.example.learning.agent.ui.screens.feed.FeedScreen
+import com.example.learning.agent.ui.screens.feed.IngestFailureInfo
 import com.example.learning.agent.ui.screens.map.WeeklySummaryDetailScreen
 import com.example.learning.agent.ui.screens.map.WeeklySummaryScreen
 import com.example.learning.agent.ui.screens.notes.NotesScreen
@@ -26,6 +27,9 @@ fun AppNavHost(
     onDocumentDeselect: () -> Unit = {},
     onDocumentDeleted: (documentId: String) -> Unit = {},
     onAskAboutDocument: (id: String, title: String?) -> Unit = { _, _ -> },
+    addIngestFailure: (IngestFailureInfo) -> Unit = {},
+    refreshFeedTrigger: Int = 0,
+    onRefreshDone: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     NavHost(
@@ -41,7 +45,10 @@ fun AppNavHost(
                 onDocumentDeleted = onDocumentDeleted,
                 onCardClick = { id ->
                     navController.navigate(Destination.FeedDetail.createRoute(id))
-                }
+                },
+                addIngestFailure = addIngestFailure,
+                refreshFeedTrigger = refreshFeedTrigger,
+                onRefreshDone = onRefreshDone
             )
         }
         composable(

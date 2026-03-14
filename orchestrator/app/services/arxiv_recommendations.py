@@ -1,19 +1,22 @@
 """
 Weekly arXiv recommendations: fetch S2 text, search arXiv, re-rank by S2 embedding similarity, store Top 3.
 Called from S2 consolidation after S2 is created.
+User notes (recent) are combined with S2 text so "want to learn more about X" influences recommendations.
 """
 from __future__ import annotations
 
 import logging
 import re
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone, timedelta
 from typing import Any, List, Optional, Tuple
 from urllib.parse import quote_plus
 
 import requests
 
 from app.db.repo import SupabaseRepo
-from app.utils.embeddings import create_embeddings
+from app.feedback_types import NEGATIVE_FEEDBACK_ACTIONS, POSITIVE_FEEDBACK_ACTIONS
+from app.utils.embeddings import create_embeddings, get_embedding_model
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,38 @@ ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
 MAX_CANDIDATES = 10
 TOP_N = 3
 USER_AGENT = "LearningAgent-Recommendations/1.0"
+NOTES_DAYS_FOR_RECOMMENDATIONS = 30
+NOTES_LIMIT_FOR_RECOMMENDATIONS = 50
+FEEDBACK_DAYS_FOR_RECOMMENDATIONS = 30
+FEEDBACK_LIMIT_FOR_RECOMMENDATIONS = 50
+NEGATIVE_FEEDBACK_REASONS = {
+    "not_relevant",
+    "too_basic",
+    "too_advanced",
+    "not_interested",
+    "wrong_focus",
+    "too_generic",
+    "too_long",
+    "too_shallow",
+}
+POSITIVE_FEEDBACK_REASONS = {
+    "want_more_like_this",
+    "helpful",
+    "relevant",
+}
+NEGATIVE_PENALTY_WEIGHT = 0.15
+RECOMMENDATION_PROMPT_VERSION = "rec-arxiv-v2-feedback"
+
+
+def get_recommendation_generation_meta() -> dict[str, Any]:
+    """Snapshot minimal recommendation generation metadata for admin monitoring."""
+    return {
+        "prompt_version": RECOMMENDATION_PROMPT_VERSION,
+        "model_snapshot": {
+            "llm": None,
+            "embedding_model": get_embedding_model(),
+        },
+    }
 
 
 def _s2_text_to_search_query(s2_text: str, max_terms: int = 5) -> str:
@@ -85,6 +120,46 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _feedback_event_text_parts(event: Dict[str, Any]) -> List[str]:
+    """Extract useful text fields from a feedback event."""
+    parts: List[str] = []
+    meta = event.get("meta") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    for key in ("title", "topic_name", "source", "tldr"):
+        value = (meta.get(key) or "").strip() if isinstance(meta.get(key), str) else ""
+        if value:
+            parts.append(value)
+    comment = (event.get("comment") or "").strip()
+    if comment:
+        parts.append(comment)
+    return parts
+
+
+def _collect_feedback_signals(events: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """
+    Build positive/negative text signals from recent feedback events.
+    Positive text is appended to recommendation input.
+    Negative text is used as a penalty embedding.
+    """
+    positive_parts: List[str] = []
+    negative_parts: List[str] = []
+    for event in events:
+        action = (event.get("action") or "").strip()
+        reasons = {str(r).strip() for r in (event.get("reasons") or []) if str(r).strip()}
+        text_parts = _feedback_event_text_parts(event)
+        if not text_parts:
+            continue
+        joined = " ".join(text_parts).strip()
+        if not joined:
+            continue
+        if action in POSITIVE_FEEDBACK_ACTIONS or reasons.intersection(POSITIVE_FEEDBACK_REASONS):
+            positive_parts.append(joined)
+        if action in NEGATIVE_FEEDBACK_ACTIONS or reasons.intersection(NEGATIVE_FEEDBACK_REASONS):
+            negative_parts.append(joined)
+    return "\n".join(positive_parts).strip(), "\n".join(negative_parts).strip()
+
+
 def run_arxiv_recommendations_for_week(
     user_id: str,
     week_start: str,
@@ -94,8 +169,10 @@ def run_arxiv_recommendations_for_week(
     """
     Generate Top 3 arXiv recommendations for the week from S2 text.
     - If s2_text is None, fetches S2 for user_id+week_start from DB and builds text from tldr+bullets.
-    - Builds search query from s2_text, fetches candidates from arXiv.
-    - Embeds S2 text and each candidate (title+abstract), re-ranks by cosine similarity.
+    - Fetches recent user notes (last NOTES_DAYS_FOR_RECOMMENDATIONS days) and appends to text so
+      "want to learn more about X" influences search query and embedding similarity.
+    - Builds search query from combined text, fetches candidates from arXiv.
+    - Embeds combined text and each candidate (title+abstract), re-ranks by cosine similarity.
     - Inserts Top 3 into recommendations.
     Returns (inserted_count, None) or (0, error_message).
     """
@@ -114,9 +191,47 @@ def run_arxiv_recommendations_for_week(
                 parts.append(str(b).strip())
         s2_text = "\n".join(parts) if parts else ""
     if not s2_text.strip():
-        return 0, "S2 has no text"
+        s2_text = ""
 
-    search_query = _s2_text_to_search_query(s2_text)
+    # Combine with recent user notes so recommendations reflect "want to learn more" etc.
+    since_ts = datetime.now(timezone.utc) - timedelta(days=NOTES_DAYS_FOR_RECOMMENDATIONS)
+    try:
+        notes_list = repo.list_notes_for_user(
+            user_id,
+            since_ts=since_ts,
+            limit=NOTES_LIMIT_FOR_RECOMMENDATIONS,
+            offset=0,
+        )
+    except Exception as e:
+        logger.warning("list_notes_for_user failed (continuing without notes): %s", e)
+        notes_list = []
+    interest_parts = []
+    for n in notes_list:
+        topic = (n.get("topic") or "").strip()
+        content = (n.get("content") or "").strip()
+        if topic or content:
+            interest_parts.append(f"{topic} {content}".strip())
+    interest_text = "\n".join(interest_parts) if interest_parts else ""
+
+    # Combine with recent feedback so recommendations improve from explicit user reactions.
+    feedback_since_ts = datetime.now(timezone.utc) - timedelta(days=FEEDBACK_DAYS_FOR_RECOMMENDATIONS)
+    try:
+        feedback_events = repo.list_recent_feedback_texts_for_user(
+            user_id,
+            since_ts=feedback_since_ts,
+            limit=FEEDBACK_LIMIT_FOR_RECOMMENDATIONS,
+        )
+    except Exception as e:
+        logger.warning("list_recent_feedback_texts_for_user failed (continuing without feedback): %s", e)
+        feedback_events = []
+    positive_feedback_text, negative_feedback_text = _collect_feedback_signals(feedback_events)
+
+    combined_parts = [part for part in (s2_text, interest_text, positive_feedback_text) if part and part.strip()]
+    combined_text = "\n\n".join(combined_parts).strip()
+    if not combined_text:
+        return 0, "S2 has no text and no notes"
+
+    search_query = _s2_text_to_search_query(combined_text)
     candidates = _fetch_arxiv_search(search_query)
     if len(candidates) < TOP_N:
         logger.info("arxiv_recommendations: got %d candidates, need at least %d", len(candidates), TOP_N)
@@ -125,10 +240,18 @@ def run_arxiv_recommendations_for_week(
         return 0, "no arXiv candidates"
 
     try:
-        s2_embedding = create_embeddings([s2_text[:8000]])[0]
+        s2_embedding = create_embeddings([combined_text[:8000]])[0]
     except Exception as e:
         logger.warning("S2 embedding failed: %s", e)
         return 0, f"embedding failed: {e}"
+
+    negative_embedding = None
+    if negative_feedback_text:
+        try:
+            negative_embedding = create_embeddings([negative_feedback_text[:8000]])[0]
+        except Exception as e:
+            logger.warning("Negative feedback embedding failed (continuing without penalty): %s", e)
+            negative_embedding = None
 
     texts_to_embed = [f"{c['title']} {c['abstract']}"[:8000] for c in candidates]
     try:
@@ -137,11 +260,17 @@ def run_arxiv_recommendations_for_week(
         logger.warning("Candidate embeddings failed: %s", e)
         return 0, f"embedding failed: {e}"
 
-    scored = [
-        (c, _cosine_similarity(s2_embedding, candidate_embeddings[i]))
-        for i, c in enumerate(candidates)
-        if i < len(candidate_embeddings)
-    ]
+    scored = []
+    for i, c in enumerate(candidates):
+        if i >= len(candidate_embeddings):
+            continue
+        base_score = _cosine_similarity(s2_embedding, candidate_embeddings[i])
+        if negative_embedding is not None:
+            negative_score = _cosine_similarity(negative_embedding, candidate_embeddings[i])
+            final_score = base_score - (NEGATIVE_PENALTY_WEIGHT * negative_score)
+        else:
+            final_score = base_score
+        scored.append((c, final_score))
     scored.sort(key=lambda x: x[1], reverse=True)
     top = [x[0] for x in scored[:TOP_N]]
 

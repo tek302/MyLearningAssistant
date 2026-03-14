@@ -7,6 +7,7 @@ from psycopg import errors as psycopg_errors
 import psycopg.types.json
 
 from app.config import get_database_url
+from app.feedback_types import NEGATIVE_FEEDBACK_ACTIONS
 
 
 class SupabaseRepo:
@@ -186,7 +187,28 @@ class SupabaseRepo:
                     if result:
                         return str(result[0])
                     raise
-    
+
+    def insert_source_pdf_file(self, user_id: str, title: Optional[str] = None) -> str:
+        """
+        Insert a new source for Local PDF upload (source_type=pdf_file, url=NULL).
+        Caller must then upload to Storage and update meta (storage_path, original_filename).
+        Returns source_id (UUID string).
+        """
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sources (user_id, source_type, status, url, title, lang)
+                    VALUES (%s, 'pdf_file', 'pending', NULL, %s, 'en')
+                    RETURNING id
+                    """,
+                    (user_uuid, title or ""),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
     def insert_chunks(self, source_id: str, chunks: List[str]) -> List[str]:
         """
         Insert chunks for a source and return list of chunk_ids.
@@ -470,12 +492,15 @@ class SupabaseRepo:
         bullets: List[str],
         source_ids: Optional[List[str]] = None,
         topic_name: str = "This Week",
+        extra_meta: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Insert S2 (topic-scope) summary. source_id is NULL. extra has week_start, topic_name, source_ids."""
         user_uuid = self._get_or_create_user_id(user_id)
         extra = {"week_start": week_start, "topic_name": topic_name}
         if source_ids:
             extra["source_ids"] = source_ids
+        if extra_meta:
+            extra.update(extra_meta)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -514,6 +539,35 @@ class SupabaseRepo:
                 out["id"] = str(out["id"])
                 if out.get("bullets") is not None and hasattr(out["bullets"], "__iter__") and not isinstance(out["bullets"], str):
                     out["bullets"] = list(out["bullets"])
+                return out
+
+    def get_summary_by_id(self, summary_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get one summary row by id if owned by user. Supports S1/S2 feedback enrichment."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, scope, kind, source_id, tldr, bullets, extra, created_at
+                    FROM summaries
+                    WHERE id = %s AND user_id = %s
+                    """,
+                    (summary_id, user_uuid),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                out = dict(zip(cols, row))
+                out["id"] = str(out["id"])
+                if out.get("source_id") is not None:
+                    out["source_id"] = str(out["source_id"])
+                if out.get("bullets") is not None and hasattr(out["bullets"], "__iter__") and not isinstance(out["bullets"], str):
+                    out["bullets"] = list(out["bullets"])
+                if out.get("extra") is None:
+                    out["extra"] = {}
+                if out.get("created_at") is not None:
+                    out["created_at"] = out["created_at"].isoformat() if hasattr(out["created_at"], "isoformat") else str(out["created_at"])
                 return out
     
     def _check_sources_has_meta(self, conn) -> bool:
@@ -722,6 +776,73 @@ class SupabaseRepo:
                 )
                 conn.commit()
                 return job_id
+
+    def cleanup_stale_running_jobs(self, max_age_minutes: int = 15, limit: int = 1) -> List[Dict[str, Any]]:
+        """
+        Mark stale running jobs as failed.
+        A stale job is state='running' with updated_at older than max_age_minutes.
+        Also marks the linked source failed when source_id is present.
+        Returns cleaned job metadata for logging/response.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, max_age_minutes))
+        cleaned: List[Dict[str, Any]] = []
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, job_type, source_id
+                    FROM jobs
+                    WHERE state = 'running'
+                      AND updated_at < %s
+                    ORDER BY updated_at ASC
+                    LIMIT %s
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    (cutoff, max(1, limit)),
+                )
+                rows = cur.fetchall()
+                if not rows:
+                    return cleaned
+
+                for row in rows:
+                    job_id = str(row[0])
+                    user_id = str(row[1]) if row[1] is not None else None
+                    job_type = str(row[2]) if row[2] is not None else None
+                    source_id = str(row[3]) if row[3] is not None else None
+
+                    cur.execute(
+                        """
+                        UPDATE jobs
+                        SET state = 'failed',
+                            error = 'stale_running',
+                            updated_at = now()
+                        WHERE id = %s
+                        """,
+                        (job_id,),
+                    )
+
+                    if source_id:
+                        cur.execute(
+                            """
+                            UPDATE sources
+                            SET status = 'failed',
+                                fail_code = 'STALE_RUNNING'
+                            WHERE id = %s AND status = 'running'
+                            """,
+                            (source_id,),
+                        )
+
+                    cleaned.append(
+                        {
+                            "job_id": job_id,
+                            "user_id": user_id,
+                            "job_type": job_type,
+                            "source_id": source_id,
+                        }
+                    )
+
+                conn.commit()
+        return cleaned
 
     def get_job_for_user(self, user_uuid: str, job_id: str) -> Optional[Dict[str, Any]]:
         """Load job by id and user_id. Returns dict with id, state, progress, source_id, error or None.
@@ -963,4 +1084,478 @@ class SupabaseRepo:
                 deleted = cur.rowcount
                 conn.commit()
                 return deleted > 0
+
+    # --- Notes (user notes, used in recommendations) ---
+
+    def list_notes_for_user(
+        self,
+        user_id: str,
+        source_id: Optional[str] = None,
+        since_ts: Optional[datetime] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List notes for user, newest first. Optional filter by source_id or created_at >= since_ts."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT id, source_id, chunk_id, topic, content, created_at
+                    FROM notes
+                    WHERE user_id = %s
+                """
+                params: List[Any] = [user_uuid]
+                if source_id:
+                    try:
+                        uuid.UUID(source_id)
+                        q += " AND source_id = %s"
+                        params.append(source_id)
+                    except ValueError:
+                        pass
+                if since_ts is not None:
+                    q += " AND created_at >= %s"
+                    params.append(since_ts)
+                q += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+                params.append(limit)
+                params.append(offset)
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    d["id"] = str(d["id"])
+                    for col in ("source_id", "chunk_id"):
+                        if d.get(col) is not None:
+                            d[col] = str(d[col])
+                    if d.get("created_at") is not None:
+                        d["created_at"] = d["created_at"].isoformat() if hasattr(d["created_at"], "isoformat") else str(d["created_at"])
+                    out.append(d)
+                return out
+
+    def insert_note(
+        self,
+        user_id: str,
+        content: str,
+        source_id: Optional[str] = None,
+        chunk_id: Optional[str] = None,
+        topic: Optional[str] = None,
+    ) -> str:
+        """Insert one note. Returns note id."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        source_uuid = None
+        if source_id:
+            try:
+                source_uuid = uuid.UUID(source_id)
+            except ValueError:
+                pass
+        chunk_uuid = None
+        if chunk_id:
+            try:
+                chunk_uuid = uuid.UUID(chunk_id)
+            except ValueError:
+                pass
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO notes (user_id, source_id, chunk_id, topic, content, created_at)
+                    VALUES (%s, %s, %s, %s, %s, now())
+                    RETURNING id
+                    """,
+                    (user_uuid, source_uuid, chunk_uuid, topic or None, content),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
+    def delete_note(self, note_id: str, user_id: str) -> bool:
+        """Delete a note by id if owned by user. Returns True if a row was deleted."""
+        try:
+            note_uuid = uuid.UUID(note_id)
+        except ValueError:
+            return False
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM notes WHERE id = %s AND user_id = %s",
+                    (note_uuid, user_uuid),
+                )
+                deleted = cur.rowcount
+                conn.commit()
+                return deleted > 0
+
+    # --- Feedback events ---
+
+    def insert_feedback_event(
+        self,
+        user_id: str,
+        target_type: str,
+        target_id: str,
+        action: str,
+        reasons: Optional[List[str]] = None,
+        comment: Optional[str] = None,
+        source_id: Optional[str] = None,
+        week_start: Optional[str] = None,
+        meta: Optional[Dict[str, Any]] = None,
+        client_event_id: Optional[str] = None,
+    ) -> str:
+        """Insert one feedback event. Returns feedback event id. Dedupes by client_event_id when provided."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        target_uuid = uuid.UUID(target_id)
+        source_uuid = None
+        if source_id:
+            try:
+                source_uuid = uuid.UUID(source_id)
+            except ValueError:
+                source_uuid = None
+        cleaned_reasons = [str(r).strip() for r in (reasons or []) if str(r).strip()]
+        cleaned_comment = (comment or "").strip() or None
+        cleaned_meta = meta or None
+        cleaned_client_event_id = (client_event_id or "").strip() or None
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                if cleaned_client_event_id:
+                    cur.execute(
+                        "SELECT id FROM feedback_events WHERE client_event_id = %s",
+                        (cleaned_client_event_id,),
+                    )
+                    existing = cur.fetchone()
+                    if existing:
+                        return str(existing[0])
+                cur.execute(
+                    """
+                    INSERT INTO feedback_events (
+                        user_id, target_type, target_id, action, reasons, comment,
+                        source_id, week_start, meta, client_event_id, created_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s::date, %s::jsonb, %s, now())
+                    RETURNING id
+                    """,
+                    (
+                        user_uuid,
+                        target_type,
+                        str(target_uuid),
+                        action,
+                        psycopg.types.json.Json(cleaned_reasons) if cleaned_reasons else None,
+                        cleaned_comment,
+                        source_uuid,
+                        week_start,
+                        psycopg.types.json.Json(cleaned_meta) if cleaned_meta is not None else None,
+                        cleaned_client_event_id,
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
+    def list_feedback_events(
+        self,
+        user_id: Optional[str] = None,
+        target_type: Optional[str] = None,
+        target_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """List feedback events. When user_id is set, limits to that user's events."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT id, user_id, target_type, target_id, action, reasons, comment,
+                           source_id, week_start, meta, client_event_id, created_at
+                    FROM feedback_events
+                    WHERE 1=1
+                """
+                params: List[Any] = []
+                if user_id:
+                    q += " AND user_id = %s"
+                    params.append(self._get_or_create_user_id(user_id))
+                if target_type:
+                    q += " AND target_type = %s"
+                    params.append(target_type)
+                if target_id:
+                    try:
+                        q += " AND target_id = %s"
+                        params.append(str(uuid.UUID(target_id)))
+                    except ValueError:
+                        return []
+                q += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+                params.extend([limit, offset])
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    for col in ("id", "user_id", "target_id", "source_id"):
+                        if d.get(col) is not None:
+                            d[col] = str(d[col])
+                    if d.get("week_start") is not None:
+                        d["week_start"] = d["week_start"].isoformat() if hasattr(d["week_start"], "isoformat") else str(d["week_start"])
+                    if d.get("created_at") is not None:
+                        d["created_at"] = d["created_at"].isoformat() if hasattr(d["created_at"], "isoformat") else str(d["created_at"])
+                    if d.get("reasons") is None:
+                        d["reasons"] = []
+                    if d.get("meta") is None:
+                        d["meta"] = {}
+                    out.append(d)
+                return out
+
+    def get_feedback_summary(self, days: int = 30, limit_reasons: int = 10) -> Dict[str, Any]:
+        """Return aggregate feedback summary for admin dashboards."""
+        since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT target_type, COUNT(*)
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                    GROUP BY target_type
+                    """,
+                    (since_ts,),
+                )
+                totals_by_target = {str(row[0]): int(row[1]) for row in cur.fetchall()}
+
+                cur.execute(
+                    """
+                    SELECT action, COUNT(*)
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                    GROUP BY action
+                    """,
+                    (since_ts,),
+                )
+                actions = {str(row[0]): int(row[1]) for row in cur.fetchall()}
+
+                cur.execute(
+                    """
+                    SELECT reason, COUNT(*)
+                    FROM (
+                        SELECT jsonb_array_elements_text(reasons) AS reason
+                        FROM feedback_events
+                        WHERE created_at >= %s AND reasons IS NOT NULL
+                    ) r
+                    GROUP BY reason
+                    ORDER BY COUNT(*) DESC, reason ASC
+                    LIMIT %s
+                    """,
+                    (since_ts, limit_reasons),
+                )
+                top_reasons = [{"reason": str(row[0]), "count": int(row[1])} for row in cur.fetchall()]
+
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                    """,
+                    (since_ts,),
+                )
+                total = int(cur.fetchone()[0])
+
+                return {
+                    "window_days": days,
+                    "totals": {
+                        "all": total,
+                        **totals_by_target,
+                    },
+                    "actions": actions,
+                    "top_reasons": top_reasons,
+                }
+
+    def list_recent_feedback_texts_for_user(
+        self,
+        user_id: str,
+        since_ts: Optional[datetime] = None,
+        limit: int = 50,
+        target_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return recent feedback rows for text extraction in recommendation generation."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        if since_ts is None:
+            since_ts = datetime.now(timezone.utc) - timedelta(days=30)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT target_type, action, reasons, comment, meta, created_at
+                    FROM feedback_events
+                    WHERE user_id = %s AND created_at >= %s
+                """
+                params: List[Any] = [user_uuid, since_ts]
+                if target_type:
+                    q += " AND target_type = %s"
+                    params.append(target_type)
+                q += " ORDER BY created_at DESC LIMIT %s"
+                params.append(limit)
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    if d.get("created_at") is not None:
+                        d["created_at"] = d["created_at"].isoformat() if hasattr(d["created_at"], "isoformat") else str(d["created_at"])
+                    if d.get("reasons") is None:
+                        d["reasons"] = []
+                    if d.get("meta") is None:
+                        d["meta"] = {}
+                    out.append(d)
+                return out
+
+    def list_recent_negative_feedback_events(self, days: int = 30, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return recent negative feedback events for dashboard inspection."""
+        since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT target_type, action, reasons, comment, week_start, meta, created_at
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                      AND action = ANY(%s)
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    (since_ts, list(NEGATIVE_FEEDBACK_ACTIONS), limit),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out: List[Dict[str, Any]] = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    if d.get("created_at") is not None:
+                        d["created_at"] = d["created_at"].isoformat() if hasattr(d["created_at"], "isoformat") else str(d["created_at"])
+                    if d.get("week_start") is not None:
+                        d["week_start"] = d["week_start"].isoformat() if hasattr(d["week_start"], "isoformat") else str(d["week_start"])
+                    if d.get("reasons") is None:
+                        d["reasons"] = []
+                    if d.get("meta") is None:
+                        d["meta"] = {}
+                    out.append(d)
+                return out
+
+    def get_feedback_reason_breakdown(self, days: int = 30, limit: int = 10) -> List[Dict[str, Any]]:
+        """Return top feedback reasons in the time window."""
+        since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT reason, COUNT(*)
+                    FROM (
+                        SELECT jsonb_array_elements_text(reasons) AS reason
+                        FROM feedback_events
+                        WHERE created_at >= %s AND reasons IS NOT NULL
+                    ) r
+                    GROUP BY reason
+                    ORDER BY COUNT(*) DESC, reason ASC
+                    LIMIT %s
+                    """,
+                    (since_ts, limit),
+                )
+                return [{"reason": str(row[0]), "count": int(row[1])} for row in cur.fetchall()]
+
+    def get_feedback_target_type_breakdown(self, days: int = 30) -> List[Dict[str, Any]]:
+        """Return target_type counts for dashboard cards."""
+        since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT target_type, COUNT(*)
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                    GROUP BY target_type
+                    ORDER BY COUNT(*) DESC, target_type ASC
+                    """,
+                    (since_ts,),
+                )
+                return [{"target_type": str(row[0]), "count": int(row[1])} for row in cur.fetchall()]
+
+    def get_recommendation_feedback_rollup(self, days: int = 30, limit: int = 20) -> List[Dict[str, Any]]:
+        """Aggregate recommendation feedback by title and snapshot metadata."""
+        since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(meta->>'title', '(unknown)') AS title,
+                        COALESCE(meta->>'prompt_version', '') AS prompt_version,
+                        COALESCE(meta->'model_snapshot'->>'llm', '') AS llm,
+                        COALESCE(meta->'model_snapshot'->>'embedding_model', '') AS embedding_model,
+                        COUNT(*) AS total_count,
+                        COUNT(*) FILTER (WHERE action = 'thumbs_up') AS thumbs_up_count,
+                        COUNT(*) FILTER (WHERE action = 'thumbs_down') AS thumbs_down_count,
+                        MAX(created_at) AS latest_created_at
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                      AND target_type = 'recommendation'
+                    GROUP BY 1, 2, 3, 4
+                    ORDER BY thumbs_down_count DESC, total_count DESC, latest_created_at DESC
+                    LIMIT %s
+                    """,
+                    (since_ts, limit),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out: List[Dict[str, Any]] = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    if d.get("latest_created_at") is not None:
+                        d["latest_created_at"] = d["latest_created_at"].isoformat() if hasattr(d["latest_created_at"], "isoformat") else str(d["latest_created_at"])
+                    out.append(d)
+                return out
+
+    def get_s2_feedback_rollup(self, days: int = 30, limit: int = 20) -> List[Dict[str, Any]]:
+        """Aggregate S2 feedback by week_start and snapshot metadata."""
+        since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(week_start::text, meta->>'week_start', '(unknown)') AS week_start,
+                        COALESCE(meta->>'topic_name', '(unknown)') AS topic_name,
+                        COALESCE(meta->>'prompt_version', '') AS prompt_version,
+                        COALESCE(meta->'model_snapshot'->>'llm', '') AS llm,
+                        COALESCE(meta->'model_snapshot'->>'embedding_model', '') AS embedding_model,
+                        COUNT(*) AS total_count,
+                        COUNT(*) FILTER (WHERE action = 'thumbs_up') AS thumbs_up_count,
+                        COUNT(*) FILTER (WHERE action = 'thumbs_down') AS thumbs_down_count,
+                        MAX(created_at) AS latest_created_at
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                      AND target_type = 'summary_s2'
+                    GROUP BY 1, 2, 3, 4, 5
+                    ORDER BY thumbs_down_count DESC, total_count DESC, latest_created_at DESC
+                    LIMIT %s
+                    """,
+                    (since_ts, limit),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out: List[Dict[str, Any]] = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    if d.get("latest_created_at") is not None:
+                        d["latest_created_at"] = d["latest_created_at"].isoformat() if hasattr(d["latest_created_at"], "isoformat") else str(d["latest_created_at"])
+                    out.append(d)
+                return out
+
+    def get_feedback_dashboard_data(self, days: int = 30, limit: int = 20) -> Dict[str, Any]:
+        """Return compact admin dashboard data for HTML and JSON endpoints."""
+        summary = self.get_feedback_summary(days=days, limit_reasons=min(limit, 20))
+        recent_negative = self.list_recent_negative_feedback_events(days=days, limit=limit)
+        return {
+            "window_days": days,
+            "summary": summary,
+            "target_breakdown": self.get_feedback_target_type_breakdown(days=days),
+            "recent_negative": recent_negative,
+            "top_reasons": self.get_feedback_reason_breakdown(days=days, limit=min(limit, 20)),
+            "recommendation_rollup": self.get_recommendation_feedback_rollup(days=days, limit=limit),
+            "s2_rollup": self.get_s2_feedback_rollup(days=days, limit=limit),
+        }
 

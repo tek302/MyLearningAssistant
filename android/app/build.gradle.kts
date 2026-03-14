@@ -46,6 +46,13 @@ android {
     }
 }
 
+// Alias for tools/scripts that expect Java-style testClasses (e.g. IDE run configs).
+tasks.register("testClasses") {
+    group = "verification"
+    description = "Compiles unit test sources (Android equivalent of Java testClasses)"
+    dependsOn("compileDebugUnitTestKotlin", "compileDebugUnitTestJavaWithJavac")
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

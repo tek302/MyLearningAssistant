@@ -1,17 +1,20 @@
 import asyncio
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 
 from ..db.pool import resolve_user_id, with_connection
 from ..db.repo import SupabaseRepo
+from ..services.storage import MAX_UPLOAD_BYTES, upload_pdf
 from ..utils.deps import get_user_id
 from ..utils.arxiv_url import normalize_arxiv_url
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
 SOURCE_TYPES = ("pdf_url", "url", "text")
+MAX_PDF_FILE_BYTES = MAX_UPLOAD_BYTES  # 25MB
+PDF_MAGIC = b"%PDF"
 
 
 class IngestEnqueueRequest(BaseModel):
@@ -91,5 +94,37 @@ async def ingest_enqueue(
     )
     repo = SupabaseRepo()
     job_id = repo.create_job(user_id=user_id, job_type="ingest", source_id=source_id)
+    return IngestEnqueueResponse(job_id=job_id, status="queued")
+
+
+@router.post("/file", response_model=IngestEnqueueResponse)
+async def ingest_file(
+    background_tasks: BackgroundTasks,
+    user_id: Annotated[str, Depends(get_user_id)],
+    file: Annotated[UploadFile, File(description="PDF file")],
+    title: Annotated[str | None, Form()] = None,
+):
+    """Upload a local PDF for ingest. Storage + source (pdf_file) + job; process_job runs in background (B)."""
+    body = await file.read()
+    if len(body) < 4 or body[:4] != PDF_MAGIC:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Not a valid PDF")
+    if len(body) > MAX_PDF_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY,
+            detail=f"File too large (max {MAX_PDF_FILE_BYTES // (1024*1024)}MB)",
+        )
+    repo = SupabaseRepo()
+    user_uuid = repo._get_or_create_user_id(user_id)
+    source_id = await asyncio.to_thread(repo.insert_source_pdf_file, user_id, title or None)
+    storage_path = f"{user_uuid}/{source_id}.pdf"
+    try:
+        await asyncio.to_thread(upload_pdf, storage_path, body)
+    except RuntimeError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    original_filename = (title or (file.filename or "document.pdf")).strip() or "document.pdf"
+    repo.update_source(source_id, meta={"storage_path": storage_path, "original_filename": original_filename})
+    job_id = repo.create_job(user_id=user_id, job_type="ingest", source_id=source_id)
+    from app.worker.job_runner import process_job
+    background_tasks.add_task(process_job, job_id)
     return IngestEnqueueResponse(job_id=job_id, status="queued")
 

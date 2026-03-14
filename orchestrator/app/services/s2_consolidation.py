@@ -5,12 +5,25 @@ Trigger: POST /jobs/s2 (per user) or POST /worker/s2-schedule (scheduler, all us
 """
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from app.db.repo import SupabaseRepo
-from app.utils.summarization import create_s2_summary
+from app.utils.summarization import create_s2_summary, get_summary_model
 
 logger = logging.getLogger(__name__)
+
+S2_PROMPT_VERSION = "s2-summary-v1"
+
+
+def get_s2_generation_meta() -> Dict[str, Any]:
+    """Snapshot minimal generation metadata for admin monitoring."""
+    return {
+        "prompt_version": S2_PROMPT_VERSION,
+        "model_snapshot": {
+            "llm": get_summary_model(),
+            "embedding_model": None,
+        },
+    }
 
 
 def _week_start_monday(dt: datetime) -> str:
@@ -87,6 +100,7 @@ def run_s2_consolidation(user_id: str, week_start: Optional[str] = None, days: i
         bullets=summary["bullets"],
         source_ids=source_ids,
         topic_name="This Week",
+        extra_meta=get_s2_generation_meta(),
     )
     logger.info("s2 user_id=%s week_start=%s created S2 bullets=%s", user_id, week_start, len(summary["bullets"]))
     return True, None

@@ -16,7 +16,8 @@ interface DocumentsApi {
     suspend fun getDocuments(
         @Query("limit") limit: Int = 20,
         @Query("offset") offset: Int = 0,
-        @Query("include_summary") include_summary: Boolean = false
+        @Query("include_summary") include_summary: Boolean = false,
+        @Query("_t") cacheBust: Long? = null
     ): Response<DocumentsResponse>
 
     @DELETE("documents/{document_id}")
@@ -44,6 +45,7 @@ interface DocumentsApi {
         val fail_code: String?,
         val created_at: String?,
         val updated_at: String?,
+        val job_id: String? = null,
         val tldr: String? = null,
         val bullets: List<String>? = null
     )

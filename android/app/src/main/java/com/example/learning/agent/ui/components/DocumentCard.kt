@@ -165,6 +165,19 @@ fun DocumentCard(
                 )
             }
 
+            // Ingest date below summary (small)
+            document.created_at?.takeIf { it.isNotBlank() }?.let { raw ->
+                val dateOnly = raw.take(10) // ISO "2025-03-01" or "2025-03-01T..."
+                if (dateOnly.length >= 10) {
+                    Text(
+                        text = "Ingested: $dateOnly",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        modifier = Modifier.padding(top = 2.dp, bottom = 4.dp)
+                    )
+                }
+            }
+
             // Key points: up to 3 (backend: S1_BULLETS_COUNT=3), allow wrap per bullet
             (document.bullets?.filter { it.isNotBlank() }?.take(3))?.forEach { bullet ->
                 Row(
@@ -191,19 +204,19 @@ fun DocumentCard(
                 Spacer(modifier = Modifier.height(12.dp))
             }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = buildString {
-                        append(document.source_type ?: "Document")
-                        document.pages?.let { append(" • $it pages") }
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            // Optional: page count only (source_type url/pdf_url display removed)
+            document.pages?.let { count ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "$count pages",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(8.dp))

@@ -34,6 +34,7 @@ def _list_sources(
                     """
                     SELECT s.id, s.title, s.url, s.source_type, s.status, s.pages, s.size_mb, s.fail_code,
                            s.created_at, s.updated_at,
+                           (SELECT j.id FROM jobs j WHERE j.source_id = s.id ORDER BY j.created_at DESC LIMIT 1) AS job_id,
                            sm.tldr, sm.bullets
                     FROM sources s
                     LEFT JOIN summaries sm ON sm.source_id = s.id AND sm.scope = 'doc' AND sm.kind = 'S1'
@@ -46,11 +47,12 @@ def _list_sources(
             else:
                 cur.execute(
                     """
-                    SELECT id, title, url, source_type, status, pages, size_mb, fail_code,
-                           created_at, updated_at
-                    FROM sources
-                    WHERE user_id = %s
-                    ORDER BY created_at DESC
+                    SELECT s.id, s.title, s.url, s.source_type, s.status, s.pages, s.size_mb, s.fail_code,
+                           s.created_at, s.updated_at,
+                           (SELECT j.id FROM jobs j WHERE j.source_id = s.id ORDER BY j.created_at DESC LIMIT 1) AS job_id
+                    FROM sources s
+                    WHERE s.user_id = %s
+                    ORDER BY s.created_at DESC
                     LIMIT %s OFFSET %s
                     """,
                     (user_uuid, limit, offset),
@@ -61,6 +63,8 @@ def _list_sources(
             for row in rows:
                 d = dict(zip(cols, row))
                 d["id"] = str(d["id"])
+                if d.get("job_id") is not None:
+                    d["job_id"] = str(d["job_id"])
                 for ts in ("created_at", "updated_at"):
                     if d.get(ts) is not None:
                         d[ts] = d[ts].isoformat()
