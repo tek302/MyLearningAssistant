@@ -36,7 +36,11 @@ def _merge_meta(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]
     return merged
 
 
-def _enrich_feedback_meta(repo: SupabaseRepo, user_id: str, body: "FeedbackCreateBody") -> dict[str, Any]:
+def _enrich_feedback_target(
+    repo: SupabaseRepo,
+    user_id: str,
+    body: "FeedbackCreateBody",
+) -> tuple[dict[str, Any], Optional[str], Optional[str]]:
     meta = dict(body.meta or {})
 
     if body.target_type == "recommendation":
@@ -54,7 +58,7 @@ def _enrich_feedback_meta(repo: SupabaseRepo, user_id: str, body: "FeedbackCreat
                 **get_recommendation_generation_meta(),
             },
         )
-        return meta
+        return meta, None, target.get("week_start")
 
     target = repo.get_summary_by_id(body.target_id, user_id)
     if not target:
@@ -77,7 +81,9 @@ def _enrich_feedback_meta(repo: SupabaseRepo, user_id: str, body: "FeedbackCreat
     }
     if body.target_type == "summary_s2" and not summary_meta.get("prompt_version"):
         summary_meta = _merge_meta(summary_meta, get_s2_generation_meta())
-    return _merge_meta(meta, summary_meta)
+    derived_week_start = extra.get("week_start")
+    derived_source_id = target.get("source_id")
+    return _merge_meta(meta, summary_meta), derived_source_id, derived_week_start
 
 
 class FeedbackCreateBody(BaseModel):
@@ -137,7 +143,7 @@ async def create_feedback(
 ):
     """Create a feedback event for summary or recommendation."""
     repo = SupabaseRepo()
-    enriched_meta = _enrich_feedback_meta(repo, user_id, body)
+    enriched_meta, derived_source_id, derived_week_start = _enrich_feedback_target(repo, user_id, body)
     try:
         feedback_id = await asyncio.to_thread(
             repo.insert_feedback_event,
@@ -147,8 +153,8 @@ async def create_feedback(
             action=body.action,
             reasons=body.reasons,
             comment=body.comment,
-            source_id=body.source_id,
-            week_start=body.week_start,
+            source_id=derived_source_id,
+            week_start=derived_week_start or body.week_start,
             meta=enriched_meta,
             client_event_id=body.client_event_id,
         )

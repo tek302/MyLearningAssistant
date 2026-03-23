@@ -12,6 +12,8 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
 from ..db.pool import resolve_user_id, with_connection
 from ..db.repo import SupabaseRepo
+from ..guardrails import enforce_ingest_guardrails
+from ..services.storage import canonical_pdf_storage_path, delete_pdf
 from ..utils.deps import get_user_id
 from ..worker.job_runner import process_job
 
@@ -109,11 +111,17 @@ def _delete_source_by_id(user_id: str, document_id: str) -> bool:
                 return False
             # Ensure the source belongs to the user before deleting
             cur.execute(
-                "SELECT id FROM sources WHERE id = %s AND user_id = %s",
+                "SELECT id, user_id, source_type, meta FROM sources WHERE id = %s AND user_id = %s",
                 (doc_uuid, user_uuid),
             )
-            if cur.fetchone() is None:
+            source_row = cur.fetchone()
+            if source_row is None:
                 return False
+            _, source_user_id, source_type, _source_meta = source_row
+            source_user_id = str(source_user_id)
+            storage_path = None
+            if source_type == "pdf_file":
+                storage_path = canonical_pdf_storage_path(source_user_id, str(doc_uuid))
             # Match actual DB: notes, users.active_source_id, jobs, then summaries/embeddings/chunks/source
             cur.execute("UPDATE users SET active_source_id = NULL WHERE active_source_id = %s", (doc_uuid,))
             cur.execute("DELETE FROM notes WHERE source_id = %s", (doc_uuid,))
@@ -129,7 +137,12 @@ def _delete_source_by_id(user_id: str, document_id: str) -> bool:
             )
             cur.execute("DELETE FROM chunks WHERE source_id = %s", (doc_uuid,))
             cur.execute("DELETE FROM sources WHERE id = %s AND user_id = %s", (doc_uuid, user_uuid))
-            return cur.rowcount > 0
+            deleted = cur.rowcount > 0
+            if deleted and storage_path:
+                conn.commit()
+                delete_pdf(storage_path)
+                return True
+            return deleted
 
 
 @router.delete("/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -196,6 +209,8 @@ async def reprocess_document(
 ):
     """Re-queue a PDF document for processing and run the worker once so it is processed immediately (e.g. title may be set)."""
     try:
+        repo = SupabaseRepo()
+        await asyncio.to_thread(enforce_ingest_guardrails, repo, user_id)
         job_id = await asyncio.to_thread(_reprocess_source, user_id, document_id)
     except Exception as e:
         logger.exception("reprocess_document failed: %s", e)

@@ -85,6 +85,7 @@ class SupabaseRepo:
                         if result:
                             return str(result[0])
                         raise
+
                 except ValueError:
                     # Not a UUID, treat as firebase_uid
                     cur.execute(
@@ -123,6 +124,20 @@ class SupabaseRepo:
                         if result:
                             return str(result[0])
                         raise
+
+    def get_existing_user_id(self, user_identifier: str) -> Optional[str]:
+        """Return existing user UUID for a UUID or firebase_uid identifier, without creating a new row."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                try:
+                    uuid_obj = uuid.UUID(user_identifier)
+                    cur.execute("SELECT id FROM users WHERE id = %s", (str(uuid_obj),))
+                    row = cur.fetchone()
+                    return str(row[0]) if row else None
+                except ValueError:
+                    cur.execute("SELECT id FROM users WHERE firebase_uid = %s", (user_identifier,))
+                    row = cur.fetchone()
+                    return str(row[0]) if row else None
     
     def insert_source(
         self, 
@@ -749,6 +764,30 @@ class SupabaseRepo:
                     out["payload"] = dict(out["payload"])
                 return out
 
+    def get_source_by_id_for_user(self, source_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Load source by id if owned by the given user."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, url, source_type, status, title, lang, meta, pages, size_mb, char_count, fail_code
+                    FROM sources
+                    WHERE id = %s AND user_id = %s
+                    """,
+                    (source_id, user_uuid),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                out = dict(zip(cols, row))
+                out["id"] = str(out["id"])
+                out["user_id"] = str(out["user_id"])
+                if out.get("meta") is not None and hasattr(out["meta"], "copy"):
+                    out["meta"] = dict(out["meta"])
+                return out
+
     def claim_one_queued_job(self) -> Optional[str]:
         """
         Claim one job with state='queued'; set state='running'.
@@ -776,6 +815,217 @@ class SupabaseRepo:
                 )
                 conn.commit()
                 return job_id
+
+    def claim_one_queued_job_for_user(self, user_id: str) -> Optional[str]:
+        """Claim one queued job owned by the given user; set state='running'."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id FROM jobs
+                    WHERE state = 'queued' AND user_id = %s
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    (user_uuid,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                job_id = str(row[0])
+                cur.execute(
+                    "UPDATE jobs SET state = 'running', updated_at = now() WHERE id = %s AND user_id = %s",
+                    (job_id, user_uuid),
+                )
+                conn.commit()
+                return job_id
+
+    def count_jobs_for_user(
+        self,
+        user_id: str,
+        job_type: Optional[str] = None,
+        states: Optional[List[str]] = None,
+    ) -> int:
+        """Count jobs for a user, optionally filtered by type and states."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = "SELECT COUNT(*) FROM jobs WHERE user_id = %s"
+                params: List[Any] = [user_uuid]
+                if job_type:
+                    q += " AND job_type = %s"
+                    params.append(job_type)
+                if states:
+                    q += " AND state = ANY(%s)"
+                    params.append(states)
+                cur.execute(q, params)
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+
+    def get_latest_job_created_at_for_user(
+        self,
+        user_id: str,
+        job_type: Optional[str] = None,
+    ) -> Optional[datetime]:
+        """Return latest job created_at for a user, optionally filtered by type."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = "SELECT created_at FROM jobs WHERE user_id = %s"
+                params: List[Any] = [user_uuid]
+                if job_type:
+                    q += " AND job_type = %s"
+                    params.append(job_type)
+                q += " ORDER BY created_at DESC LIMIT 1"
+                cur.execute(q, params)
+                row = cur.fetchone()
+                if not row or row[0] is None:
+                    return None
+                return row[0]
+
+    def list_jobs_for_user(
+        self,
+        user_id: str,
+        limit: int = 20,
+        offset: int = 0,
+        job_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List jobs for a user, newest first."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT id, user_id, job_type, state, progress, source_id, error, payload, created_at, updated_at
+                    FROM jobs
+                    WHERE user_id = %s
+                """
+                params: List[Any] = [user_uuid]
+                if job_type:
+                    q += " AND job_type = %s"
+                    params.append(job_type)
+                q += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+                params.extend([limit, offset])
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out: List[Dict[str, Any]] = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    for key in ("id", "user_id", "source_id"):
+                        if d.get(key) is not None:
+                            d[key] = str(d[key])
+                    for key in ("created_at", "updated_at"):
+                        if d.get(key) is not None:
+                            d[key] = d[key].isoformat() if hasattr(d[key], "isoformat") else str(d[key])
+                    if d.get("payload") is not None and hasattr(d["payload"], "copy"):
+                        d["payload"] = dict(d["payload"])
+                    out.append(d)
+                return out
+
+    def get_ingest_failure_summary_for_user(
+        self,
+        user_id: str,
+        days: int = 7,
+        limit_recent: int = 5,
+        limit_fail_codes: int = 3,
+    ) -> Dict[str, Any]:
+        """Return compact ingest failure summary for admin/debug use."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*), MAX(updated_at)
+                    FROM sources
+                    WHERE user_id = %s
+                      AND status = 'failed'
+                      AND updated_at >= %s
+                    """,
+                    (user_uuid, since_ts),
+                )
+                count_row = cur.fetchone()
+                recent_failed_count = int(count_row[0]) if count_row and count_row[0] is not None else 0
+                last_failed_at = count_row[1]
+
+                cur.execute(
+                    """
+                    SELECT COALESCE(fail_code, 'UNKNOWN'), COUNT(*)
+                    FROM sources
+                    WHERE user_id = %s
+                      AND status = 'failed'
+                      AND updated_at >= %s
+                    GROUP BY COALESCE(fail_code, 'UNKNOWN')
+                    ORDER BY COUNT(*) DESC, COALESCE(fail_code, 'UNKNOWN') ASC
+                    LIMIT %s
+                    """,
+                    (user_uuid, since_ts, limit_fail_codes),
+                )
+                top_fail_codes = [
+                    {"fail_code": str(row[0]), "count": int(row[1])}
+                    for row in cur.fetchall()
+                ]
+
+                cur.execute(
+                    """
+                    SELECT
+                        s.id,
+                        s.title,
+                        s.url,
+                        s.source_type,
+                        s.fail_code,
+                        s.updated_at,
+                        j.id AS job_id,
+                        j.error AS job_error,
+                        j.updated_at AS job_updated_at
+                    FROM sources s
+                    LEFT JOIN LATERAL (
+                        SELECT id, error, updated_at
+                        FROM jobs
+                        WHERE source_id = s.id AND job_type = 'ingest'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    ) j ON TRUE
+                    WHERE s.user_id = %s
+                      AND s.status = 'failed'
+                      AND s.updated_at >= %s
+                    ORDER BY s.updated_at DESC
+                    LIMIT %s
+                    """,
+                    (user_uuid, since_ts, limit_recent),
+                )
+                cols = [d[0] for d in cur.description]
+                recent_failures: List[Dict[str, Any]] = []
+                for row in cur.fetchall():
+                    d = dict(zip(cols, row))
+                    for key in ("id", "job_id"):
+                        if d.get(key) is not None:
+                            d[key] = str(d[key])
+                    for key in ("updated_at", "job_updated_at"):
+                        if d.get(key) is not None:
+                            d[key] = d[key].isoformat() if hasattr(d[key], "isoformat") else str(d[key])
+                    recent_failures.append(
+                        {
+                            "source_id": d.get("id"),
+                            "title": d.get("title"),
+                            "url": d.get("url"),
+                            "source_type": d.get("source_type"),
+                            "fail_code": d.get("fail_code"),
+                            "updated_at": d.get("updated_at"),
+                            "job_id": d.get("job_id"),
+                            "job_error": d.get("job_error"),
+                        }
+                    )
+
+                return {
+                    "window_days": days,
+                    "recent_failed_count": recent_failed_count,
+                    "last_failed_at": last_failed_at.isoformat() if hasattr(last_failed_at, "isoformat") else (str(last_failed_at) if last_failed_at else None),
+                    "top_fail_codes": top_fail_codes,
+                    "recent_failures": recent_failures,
+                }
 
     def cleanup_stale_running_jobs(self, max_age_minutes: int = 15, limit: int = 1) -> List[Dict[str, Any]]:
         """
@@ -1201,7 +1451,7 @@ class SupabaseRepo:
         meta: Optional[Dict[str, Any]] = None,
         client_event_id: Optional[str] = None,
     ) -> str:
-        """Insert one feedback event. Returns feedback event id. Dedupes by client_event_id when provided."""
+        """Insert one feedback event. Returns feedback event id. Dedupes by (user_id, client_event_id) when provided."""
         user_uuid = self._get_or_create_user_id(user_id)
         target_uuid = uuid.UUID(target_id)
         source_uuid = None
@@ -1218,8 +1468,8 @@ class SupabaseRepo:
             with conn.cursor() as cur:
                 if cleaned_client_event_id:
                     cur.execute(
-                        "SELECT id FROM feedback_events WHERE client_event_id = %s",
-                        (cleaned_client_event_id,),
+                        "SELECT id FROM feedback_events WHERE client_event_id = %s AND user_id = %s",
+                        (cleaned_client_event_id, user_uuid),
                     )
                     existing = cur.fetchone()
                     if existing:
@@ -1557,5 +1807,468 @@ class SupabaseRepo:
             "top_reasons": self.get_feedback_reason_breakdown(days=days, limit=min(limit, 20)),
             "recommendation_rollup": self.get_recommendation_feedback_rollup(days=days, limit=limit),
             "s2_rollup": self.get_s2_feedback_rollup(days=days, limit=limit),
+        }
+
+    # ─── User Keywords (2-Stage Pipeline) ───
+
+    def list_user_keywords(
+        self, user_id: str, status: Optional[str] = None, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """List keywords for a user, optionally filtered by status."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT id, keyword, weight, source, status,
+                           parent_keyword_id, accept_count,
+                           paper_feedback_up, paper_feedback_down,
+                           last_activity, rejected_at, created_at, updated_at
+                    FROM user_keywords
+                    WHERE user_id = %s
+                """
+                params: List[Any] = [user_uuid]
+                if status:
+                    q += " AND status = %s"
+                    params.append(status)
+                q += " ORDER BY weight DESC, updated_at DESC LIMIT %s"
+                params.append(limit)
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    d["id"] = str(d["id"])
+                    if d.get("parent_keyword_id") is not None:
+                        d["parent_keyword_id"] = str(d["parent_keyword_id"])
+                    for ts_col in ("last_activity", "rejected_at", "created_at", "updated_at"):
+                        if d.get(ts_col) is not None:
+                            d[ts_col] = d[ts_col].isoformat() if hasattr(d[ts_col], "isoformat") else str(d[ts_col])
+                    out.append(d)
+                return out
+
+    def insert_user_keyword(
+        self,
+        user_id: str,
+        keyword: str,
+        source: str = "user_explicit",
+        parent_keyword_id: Optional[str] = None,
+        weight: float = 1.0,
+    ) -> str:
+        """Insert a user keyword. Returns keyword id."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        parent_uuid = None
+        if parent_keyword_id:
+            try:
+                parent_uuid = uuid.UUID(parent_keyword_id)
+            except ValueError:
+                pass
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO user_keywords (user_id, keyword, weight, source, parent_keyword_id)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (user_uuid, keyword.strip(), weight, source, parent_uuid),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
+    def update_user_keyword(
+        self,
+        keyword_id: str,
+        user_id: str,
+        weight: Optional[float] = None,
+        status: Optional[str] = None,
+        last_activity: Optional[datetime] = None,
+        paper_feedback_up_incr: int = 0,
+        paper_feedback_down_incr: int = 0,
+        accept_count_incr: int = 0,
+    ) -> bool:
+        """Update keyword fields. Increments are added atomically. Returns True if updated."""
+        try:
+            kw_uuid = uuid.UUID(keyword_id)
+        except ValueError:
+            return False
+        user_uuid = self._get_or_create_user_id(user_id)
+        sets: List[str] = ["updated_at = now()"]
+        params: List[Any] = []
+        if weight is not None:
+            sets.append("weight = %s")
+            params.append(weight)
+        if status is not None:
+            sets.append("status = %s")
+            params.append(status)
+        if last_activity is not None:
+            sets.append("last_activity = %s")
+            params.append(last_activity)
+        if paper_feedback_up_incr:
+            sets.append("paper_feedback_up = paper_feedback_up + %s")
+            params.append(paper_feedback_up_incr)
+        if paper_feedback_down_incr:
+            sets.append("paper_feedback_down = paper_feedback_down + %s")
+            params.append(paper_feedback_down_incr)
+        if accept_count_incr:
+            sets.append("accept_count = accept_count + %s")
+            params.append(accept_count_incr)
+        params.extend([kw_uuid, user_uuid])
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE user_keywords SET {', '.join(sets)} WHERE id = %s AND user_id = %s",
+                    params,
+                )
+                updated = cur.rowcount
+                conn.commit()
+                return updated > 0
+
+    def archive_user_keyword(self, keyword_id: str, user_id: str) -> bool:
+        """Soft-delete: set status='archived'. Returns True if updated."""
+        return self.update_user_keyword(keyword_id, user_id, status="archived")
+
+    # ─── Keyword Suggestions (Stage 1) ───
+
+    def list_keyword_suggestions(
+        self,
+        user_id: str,
+        status: Optional[str] = None,
+        week_start: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """List keyword suggestions for a user."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT id, keyword, parent_keyword, suggestion_type, reason,
+                           confidence, status, responded_at, source_run_id,
+                           week_start, created_at
+                    FROM keyword_suggestions
+                    WHERE user_id = %s
+                """
+                params: List[Any] = [user_uuid]
+                if status:
+                    q += " AND status = %s"
+                    params.append(status)
+                if week_start:
+                    q += " AND week_start = %s"
+                    params.append(week_start)
+                q += " ORDER BY created_at DESC LIMIT %s"
+                params.append(limit)
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    d["id"] = str(d["id"])
+                    if d.get("source_run_id") is not None:
+                        d["source_run_id"] = str(d["source_run_id"])
+                    if d.get("week_start") is not None:
+                        d["week_start"] = str(d["week_start"])
+                    for ts_col in ("responded_at", "created_at"):
+                        if d.get(ts_col) is not None:
+                            d[ts_col] = d[ts_col].isoformat() if hasattr(d[ts_col], "isoformat") else str(d[ts_col])
+                    out.append(d)
+                return out
+
+    def insert_keyword_suggestions(
+        self,
+        user_id: str,
+        suggestions: List[Dict[str, Any]],
+        week_start: str,
+        source_run_id: Optional[str] = None,
+    ) -> List[str]:
+        """Batch-insert keyword suggestions. Returns list of created ids."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        run_uuid = None
+        if source_run_id:
+            try:
+                run_uuid = uuid.UUID(source_run_id)
+            except ValueError:
+                pass
+        ids = []
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                for s in suggestions:
+                    cur.execute(
+                        """
+                        INSERT INTO keyword_suggestions
+                            (user_id, keyword, parent_keyword, suggestion_type, reason,
+                             confidence, week_start, source_run_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id
+                        """,
+                        (
+                            user_uuid,
+                            s["keyword"],
+                            s.get("parent_keyword"),
+                            s.get("type", "derivative"),
+                            s.get("reason", ""),
+                            s.get("confidence", 0.5),
+                            week_start,
+                            run_uuid,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    ids.append(str(row[0]))
+                conn.commit()
+        return ids
+
+    def accept_keyword_suggestion(self, suggestion_id: str, user_id: str) -> Optional[str]:
+        """Accept a suggestion: update status, create user_keyword. Returns new keyword_id or None."""
+        try:
+            sug_uuid = uuid.UUID(suggestion_id)
+        except ValueError:
+            return None
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE keyword_suggestions
+                    SET status = 'accepted', responded_at = now()
+                    WHERE id = %s AND user_id = %s AND status = 'pending'
+                    RETURNING keyword, parent_keyword
+                    """,
+                    (sug_uuid, user_uuid),
+                )
+                row = cur.fetchone()
+                if not row:
+                    conn.rollback()
+                    return None
+                keyword, parent_keyword = row
+                parent_kw_id = None
+                if parent_keyword:
+                    cur.execute(
+                        "SELECT id FROM user_keywords WHERE user_id = %s AND lower(keyword) = lower(%s) AND status IN ('active','declining')",
+                        (user_uuid, parent_keyword),
+                    )
+                    prow = cur.fetchone()
+                    if prow:
+                        parent_kw_id = prow[0]
+                cur.execute(
+                    "SELECT id FROM user_keywords WHERE user_id = %s AND lower(keyword) = lower(%s) AND status IN ('active','declining')",
+                    (user_uuid, keyword),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    cur.execute(
+                        "UPDATE user_keywords SET accept_count = accept_count + 1, last_activity = now(), updated_at = now() WHERE id = %s RETURNING id",
+                        (existing[0],),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        INSERT INTO user_keywords (user_id, keyword, source, parent_keyword_id, weight)
+                        VALUES (%s, %s, 'stage1_accepted', %s, 1.0)
+                        RETURNING id
+                        """,
+                        (user_uuid, keyword, parent_kw_id),
+                    )
+                kw_row = cur.fetchone()
+                conn.commit()
+                return str(kw_row[0]) if kw_row else None
+
+    def reject_keyword_suggestion(self, suggestion_id: str, user_id: str) -> bool:
+        """Reject a suggestion. Returns True if updated."""
+        try:
+            sug_uuid = uuid.UUID(suggestion_id)
+        except ValueError:
+            return False
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE keyword_suggestions
+                    SET status = 'rejected', responded_at = now()
+                    WHERE id = %s AND user_id = %s AND status = 'pending'
+                    """,
+                    (sug_uuid, user_uuid),
+                )
+                updated = cur.rowcount
+                conn.commit()
+                return updated > 0
+
+    def get_rejected_keywords_within_days(self, user_id: str, days: int = 30) -> List[str]:
+        """Get keywords rejected within last N days (for re-suggestion filtering)."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT lower(keyword)
+                    FROM keyword_suggestions
+                    WHERE user_id = %s AND status = 'rejected'
+                      AND responded_at > now() - make_interval(days => %s)
+                    """,
+                    (user_uuid, days),
+                )
+                return [row[0] for row in cur.fetchall()]
+
+    # ─── Recommendation Generation Runs ───
+
+    def insert_recommendation_generation_run(
+        self,
+        user_id: str,
+        week_start: str,
+        stage: str,
+        keyword_snapshot: List[Dict[str, Any]],
+        candidate_count: int = 0,
+        selected_count: int = 0,
+        query_text: Optional[str] = None,
+        selected_urls: Optional[List[str]] = None,
+        score_breakdown: Optional[Dict[str, Any]] = None,
+        stage1_suggestion_ids: Optional[List[str]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Insert a recommendation generation run. Returns run id."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO recommendation_generation_runs
+                        (user_id, week_start, stage, keyword_snapshot,
+                         candidate_count, selected_count, query_text,
+                         selected_urls, score_breakdown, stage1_suggestion_ids, meta)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        user_uuid,
+                        week_start,
+                        stage,
+                        psycopg.types.json.Jsonb(keyword_snapshot),
+                        candidate_count,
+                        selected_count,
+                        query_text,
+                        psycopg.types.json.Jsonb(selected_urls or []),
+                        psycopg.types.json.Jsonb(score_breakdown or {}),
+                        psycopg.types.json.Jsonb(stage1_suggestion_ids or []),
+                        psycopg.types.json.Jsonb(meta or {}),
+                    ),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
+    def get_active_keyword_snapshot(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get current active keyword set as a lightweight snapshot for runs/pipeline."""
+        keywords = self.list_user_keywords(user_id, status="active")
+        return [
+            {"keyword": k["keyword"], "weight": float(k["weight"]), "source": k["source"]}
+            for k in keywords
+        ]
+
+    # ─── Recommendation Generation Runs (Explanation / Debug) ───
+
+    def list_recommendation_generation_runs(
+        self, user_id: str, week_start: Optional[str] = None, stage: Optional[str] = None, limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """List recent recommendation generation runs for a user."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT id, week_start, stage, keyword_snapshot,
+                           candidate_count, selected_count, query_text,
+                           selected_urls, score_breakdown, stage1_suggestion_ids,
+                           meta, created_at
+                    FROM recommendation_generation_runs
+                    WHERE user_id = %s
+                """
+                params: List[Any] = [user_uuid]
+                if week_start:
+                    q += " AND week_start = %s::date"
+                    params.append(week_start)
+                if stage:
+                    q += " AND stage = %s"
+                    params.append(stage)
+                q += " ORDER BY created_at DESC LIMIT %s"
+                params.append(limit)
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    d["id"] = str(d["id"])
+                    if d.get("week_start") is not None:
+                        d["week_start"] = d["week_start"].isoformat() if hasattr(d["week_start"], "isoformat") else str(d["week_start"])
+                    if d.get("created_at") is not None:
+                        d["created_at"] = d["created_at"].isoformat() if hasattr(d["created_at"], "isoformat") else str(d["created_at"])
+                    out.append(d)
+                return out
+
+    def get_recommendation_explanation(
+        self, recommendation_id: str, user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Build explanation for a recommendation by matching its URL/week_start
+        to a recommendation_generation_run's score_breakdown.
+        """
+        rec = self.get_recommendation_by_id(recommendation_id, user_id)
+        if not rec:
+            return None
+
+        rec_url = (rec.get("url") or "").strip()
+        rec_week = rec.get("week_start")
+
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, week_start, stage, keyword_snapshot,
+                           selected_urls, score_breakdown, stage1_suggestion_ids, meta, created_at
+                    FROM recommendation_generation_runs
+                    WHERE user_id = %s AND stage = 'stage2'
+                      AND week_start = %s::date
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (user_uuid, rec_week),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"recommendation_id": recommendation_id, "explanation": "no generation run found"}
+                cols = [d[0] for d in cur.description]
+                run = dict(zip(cols, row))
+
+        score_breakdown = run.get("score_breakdown") or {}
+        per_rec = score_breakdown.get("per_recommendation") or []
+        matched_entry = next((p for p in per_rec if p.get("url") == rec_url), None)
+
+        keyword_snapshot = run.get("keyword_snapshot") or []
+        stage1_ids = run.get("stage1_suggestion_ids") or []
+
+        return {
+            "recommendation_id": recommendation_id,
+            "week_start": str(run.get("week_start", "")),
+            "stage": run.get("stage", "stage2"),
+            "triggering_keywords": matched_entry.get("matched_keywords", []) if matched_entry else [],
+            "keyword_snapshot": keyword_snapshot,
+            "stage1_context": {
+                "suggestion_ids": stage1_ids,
+            },
+            "score_breakdown": {
+                "final_score": matched_entry.get("final_score") if matched_entry else None,
+                "keyword_match": matched_entry.get("keyword_match") if matched_entry else None,
+                "aggregate": {
+                    "avg_base_score": score_breakdown.get("avg_base_score"),
+                    "avg_keyword_match": score_breakdown.get("avg_keyword_match"),
+                    "avg_final_score": score_breakdown.get("avg_final_score"),
+                },
+            },
+            "meta": {
+                "source": rec.get("source", "arXiv"),
+                "run_id": str(run["id"]),
+                "prompt_version": (run.get("meta") or {}).get("prompt_version"),
+            },
         }
 

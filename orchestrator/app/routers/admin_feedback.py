@@ -15,10 +15,18 @@ from ..db.repo import SupabaseRepo
 router = APIRouter(prefix="/admin/feedback", tags=["admin-feedback"])
 
 
+def _is_local_mode() -> bool:
+    app_env = (os.getenv("APP_ENV") or "").strip().lower()
+    debug = (os.getenv("DEBUG") or "").strip().lower() in ("true", "1", "yes")
+    return app_env == "local" or debug
+
+
 def _check_admin_secret(secret_header: Optional[str], secret_query: Optional[str]) -> None:
     expected = (os.getenv("ADMIN_DASHBOARD_SECRET") or "").strip()
     if not expected:
-        return
+        if _is_local_mode():
+            return
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Admin dashboard secret not configured")
     if secret_header == expected or secret_query == expected:
         return
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")

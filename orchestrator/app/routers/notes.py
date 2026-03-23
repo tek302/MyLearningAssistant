@@ -51,6 +51,10 @@ async def create_note(
 ):
     """Create a note. Optionally attach to a document via source_id."""
     repo = SupabaseRepo()
+    if body.source_id:
+        source = await asyncio.to_thread(repo.get_source_by_id_for_user, body.source_id, user_id)
+        if not source:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
     try:
         note_id = await asyncio.to_thread(
             repo.insert_note,

@@ -35,7 +35,33 @@ interface S2Api {
 
     data class S2Extra(
         @SerializedName("week_start") val weekStart: String?,
-        @SerializedName("topic_name") val topicName: String?
+        @SerializedName("topic_name") val topicName: String?,
+        @SerializedName("period_start_et") val periodStartEt: String? = null,
+        @SerializedName("period_end_et_inclusive") val periodEndEtInclusive: String? = null,
+        @SerializedName("period_tz") val periodTz: String? = null,
+        // v2 fields — null for legacy/v1 summaries
+        val sections: List<S2Section>? = null,
+        @SerializedName("emerging_topics") val emergingTopics: List<String>? = null,
+        val connections: List<S2Connection>? = null,
+        val trajectory: S2Trajectory? = null,
+        val reflection: String? = null,
+    )
+
+    data class S2Section(
+        val keyword: String,
+        val insights: List<String>,
+        @SerializedName("doc_count") val docCount: Int = 0,
+    )
+
+    data class S2Connection(
+        val docs: List<String>,
+        val insight: String,
+    )
+
+    data class S2Trajectory(
+        val deepened: List<String>? = null,
+        @SerializedName("new_this_week") val newThisWeek: List<String>? = null,
+        val paused: List<String>? = null,
     )
 
     data class S2JobRequest(

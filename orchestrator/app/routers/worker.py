@@ -10,6 +10,8 @@ from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Request, HTTPException, status
 
 from app.db.repo import SupabaseRepo
+from app.guardrails import max_active_s2_jobs_per_user, min_s2_job_interval_seconds
+from app.services.s2_consolidation import etf_completed_week_bounds_for_scheduler
 from app.worker.job_runner import process_job
 
 logger = logging.getLogger(__name__)
@@ -18,18 +20,20 @@ router = APIRouter(prefix="/worker", tags=["worker"])
 STALE_RUNNING_JOB_MAX_AGE_MINUTES = 15
 
 
-def _week_start_monday(dt: datetime) -> str:
-    """Return ISO date (YYYY-MM-DD) of Monday of the week containing dt."""
-    weekday = dt.weekday()
-    monday = dt - timedelta(days=weekday)
-    return monday.strftime("%Y-%m-%d")
+def _is_local_mode() -> bool:
+    app_env = (os.getenv("APP_ENV") or "").strip().lower()
+    debug = (os.getenv("DEBUG") or "").strip().lower() in ("true", "1", "yes")
+    return app_env == "local" or debug
 
 
 def _check_worker_secret(request: Request) -> None:
     secret = os.getenv("WORKER_TICK_SECRET")
-    if secret:
-        if request.headers.get("X-Worker-Tick-Secret") != secret:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+    if not secret:
+        if _is_local_mode():
+            return
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Worker secret not configured")
+    if request.headers.get("X-Worker-Tick-Secret") != secret:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
 
 def _cleanup_stale_jobs(repo: SupabaseRepo, limit: int = 1) -> list[dict]:
@@ -80,7 +84,7 @@ async def cleanup_stale_jobs(
     _check_worker_secret(request)
     repo = SupabaseRepo()
     cleaned = _cleanup_stale_jobs(repo, limit=max(1, min(limit, 100)))
-    return {"status": "ok", "cleaned_count": len(cleaned), "jobs": cleaned}
+    return {"status": "ok", "cleaned_count": len(cleaned), "job_ids": [item["job_id"] for item in cleaned]}
 
 
 @router.post("/s2-schedule")
@@ -89,16 +93,29 @@ async def worker_s2_schedule(request: Request):
     Enqueue one S2 consolidation job per user that has at least one source in the last 7 days.
     For Cloud Scheduler: Friday 00:00 US Eastern (cron 0 0 * * 5, America/New_York).
     Same auth as /worker/tick: X-Worker-Tick-Secret when WORKER_TICK_SECRET is set.
-    Returns { "status": "ok", "enqueued": N, "user_ids": [...] }.
+    Returns { "status": "ok", "enqueued": N }.
     """
     _check_worker_secret(request)
     repo = SupabaseRepo()
     user_ids = repo.get_user_ids_with_sources_since(days=7)
     now = datetime.now(timezone.utc)
-    week_start = _week_start_monday(now)
+    week_start, _, _ = etf_completed_week_bounds_for_scheduler(now)
     enqueued = 0
     for uid in user_ids:
+        max_active = max_active_s2_jobs_per_user()
+        if max_active > 0:
+            active = repo.count_jobs_for_user(uid, job_type="s2", states=["queued", "running"])
+            if active >= max_active:
+                continue
+        min_interval = min_s2_job_interval_seconds()
+        if min_interval > 0:
+            latest = repo.get_latest_job_created_at_for_user(uid, job_type="s2")
+            if latest is not None:
+                if latest.tzinfo is None:
+                    latest = latest.replace(tzinfo=timezone.utc)
+                if (now - latest).total_seconds() < min_interval:
+                    continue
         repo.create_job(user_id=uid, job_type="s2", source_id=None, payload={"week_start": week_start})
         enqueued += 1
-    logger.info("s2-schedule: week_start=%s enqueued=%d user_ids=%s", week_start, enqueued, user_ids)
-    return {"status": "ok", "enqueued": enqueued, "user_ids": user_ids}
+    logger.info("s2-schedule: week_start=%s enqueued=%d", week_start, enqueued)
+    return {"status": "ok", "enqueued": enqueued}

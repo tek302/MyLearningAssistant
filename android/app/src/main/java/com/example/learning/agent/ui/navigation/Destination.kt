@@ -17,7 +17,7 @@ sealed class Destination(
     object Feed : Destination("feed", "Feed", Icons.Filled.Home)
     object Ask : Destination("ask", "Ask", Icons.Filled.QuestionAnswer)
     object Notes : Destination("notes", "Notes", Icons.AutoMirrored.Filled.Note)
-    object Map : Destination("map", "Weekly Summary", Icons.Filled.Summarize)
+    object Map : Destination("map", "Weekly", Icons.Filled.Summarize)
     object Recommendations : Destination("recommendations", "Recommendations", Icons.Filled.Star)
 
     // Detail screens (AutoMirrored.Article for RTL support)

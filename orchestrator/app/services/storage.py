@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
+from uuid import UUID
 
 import httpx
 
@@ -16,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 # Max 25MB for upload (align with API limit)
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+def canonical_pdf_storage_path(user_id: str, source_id: str) -> str:
+    """Return canonical storage path for a user's uploaded PDF."""
+    return f"{UUID(str(user_id))}/{UUID(str(source_id))}.pdf"
 
 
 def _base_url() -> Optional[str]:

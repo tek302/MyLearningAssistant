@@ -2,9 +2,12 @@ package com.example.learning.agent.ui.components
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.ThumbDown
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.*
@@ -12,8 +15,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.models.Recommendation
+import com.example.learning.agent.data.remote.RecommendationsApi
+import com.example.learning.agent.data.repository.RecommendationsRepository
+import kotlinx.coroutines.launch
 
 @Composable
 fun RecommendationCard(
@@ -27,9 +34,14 @@ fun RecommendationCard(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var abstractExpanded by remember { mutableStateOf(false) }
     val abstractText = recommendation.abstract?.trim()?.ifEmpty { null }
     val maxAbstractLines = if (abstractExpanded) Int.MAX_VALUE else 3
+
+    var explanation by remember { mutableStateOf<RecommendationsApi.ExplanationResponse?>(null) }
+    var showExplanation by remember { mutableStateOf(false) }
+    var explanationLoading by remember { mutableStateOf(false) }
 
     Card(
         modifier = modifier
@@ -42,14 +54,12 @@ fun RecommendationCard(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            // Title
             Text(
                 text = recommendation.title,
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(bottom = 8.dp)
             )
 
-            // Abstract (expandable)
             if (abstractText != null) {
                 Text(
                     text = abstractText,
@@ -68,7 +78,32 @@ fun RecommendationCard(
                 }
             }
 
-            // Source, date, and link to original
+            // Keyword tags (from explanation)
+            val keywords = explanation?.triggeringKeywords
+            if (showExplanation && keywords != null && keywords.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    keywords.forEach { kw ->
+                        AssistChip(
+                            onClick = {},
+                            label = {
+                                Text(
+                                    kw.keyword,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (kw.contribution == "primary") FontWeight.Bold else FontWeight.Normal
+                                )
+                            },
+                            modifier = Modifier.height(26.dp)
+                        )
+                    }
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -79,16 +114,48 @@ fun RecommendationCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (recommendation.url.isNotBlank()) {
-                    TextButton(
+                Row {
+                    IconButton(
                         onClick = {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(recommendation.url)))
+                            if (!showExplanation && explanation == null && !explanationLoading) {
+                                explanationLoading = true
+                                scope.launch {
+                                    when (val r = RecommendationsRepository.getExplanation(recommendation.id)) {
+                                        is RecommendationsRepository.ExplanationResult.Success -> explanation = r.data
+                                        is RecommendationsRepository.ExplanationResult.Error -> { /* silently fail */ }
+                                    }
+                                    explanationLoading = false
+                                    showExplanation = true
+                                }
+                            } else {
+                                showExplanation = !showExplanation
+                            }
                         },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        modifier = Modifier.size(32.dp)
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Original", style = MaterialTheme.typography.labelMedium)
+                        if (explanationLoading) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = "Why this?",
+                                modifier = Modifier.size(18.dp),
+                                tint = if (showExplanation) MaterialTheme.colorScheme.primary
+                                       else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (recommendation.url.isNotBlank()) {
+                        TextButton(
+                            onClick = {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(recommendation.url)))
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Original", style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
             }
@@ -101,29 +168,25 @@ fun RecommendationCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (feedbackSubmitting) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp
-                    )
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(8.dp))
                 }
                 IconButton(onClick = onThumbsUp, enabled = !feedbackSubmitting) {
                     Icon(
                         imageVector = Icons.Default.ThumbUp,
-                        contentDescription = "Helpful recommendation",
+                        contentDescription = "Helpful",
                         tint = if (feedbackAction == "thumbs_up") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 IconButton(onClick = onThumbsDown, enabled = !feedbackSubmitting) {
                     Icon(
                         imageVector = Icons.Default.ThumbDown,
-                        contentDescription = "Not helpful recommendation",
+                        contentDescription = "Not helpful",
                         tint = if (feedbackAction == "thumbs_down") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
 
-            // Optional score bar
             recommendation.score?.let { score ->
                 Spacer(modifier = Modifier.height(12.dp))
                 ScoreBar(score = score)
@@ -131,7 +194,6 @@ fun RecommendationCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Actions: Process (ingest + remove from list), Remove (delete only)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)

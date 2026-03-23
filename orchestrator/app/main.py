@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI
 from app.config import load_env
 from app.db.pool import close_pool, init_pool
 from app.routers import documents, graph_test, ingest, ingest_status, notes, rag, recommendations, s2, s2_list, worker
-from app.routers import feedback, admin_feedback
+from app.routers import feedback, admin_feedback, admin_users, keywords, recommendation_debug
 from app.utils.deps import get_user_id
 
 logger = logging.getLogger(__name__)
@@ -37,10 +37,13 @@ app.include_router(documents.router)
 app.include_router(notes.router)
 app.include_router(feedback.router)
 app.include_router(admin_feedback.router)
+app.include_router(admin_users.router)
 app.include_router(worker.router)
 app.include_router(s2.router)
 app.include_router(s2_list.router)
 app.include_router(recommendations.router)
+app.include_router(keywords.router)
+app.include_router(recommendation_debug.router)
 
 
 @app.get("/health")
@@ -77,10 +80,10 @@ async def trigger_worker(user_id: str = Depends(get_user_id)):
 
     repo = SupabaseRepo()
     cleaned = _cleanup_stale_jobs(repo, limit=1)
-    job_id = repo.claim_one_queued_job()
+    job_id = repo.claim_one_queued_job_for_user(user_id)
     if job_id:
         logger.info("trigger_worker: user=%s claimed job_id=%s", user_id, job_id)
         await process_job(job_id)
-        return {"status": "ok", "processed": True, "job_id": job_id, "cleaned_stale_jobs": cleaned}
-    return {"status": "ok", "processed": False, "cleaned_stale_jobs": cleaned}
+        return {"status": "ok", "processed": True, "job_id": job_id, "cleaned_stale_jobs": len(cleaned)}
+    return {"status": "ok", "processed": False, "cleaned_stale_jobs": len(cleaned)}
 

@@ -59,7 +59,7 @@ def _list_s2_for_user(user_id: str, week_start: str | None, limit: int) -> List[
 @router.get("/s2")
 async def list_s2(
     user_id: Annotated[str, Depends(get_user_id)],
-    week_start: str | None = Query(None, description="Filter by week_start (YYYY-MM-DD)"),
+    week_start: str | None = Query(None, description="Filter by summaries.extra.week_start (ET Friday or legacy UTC Monday)"),
     limit: int = Query(10, ge=1, le=50),
 ):
     """Return S2 summaries for the current user. Optional week_start filter."""

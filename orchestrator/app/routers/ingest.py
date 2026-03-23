@@ -6,7 +6,8 @@ from pydantic import BaseModel
 
 from ..db.pool import resolve_user_id, with_connection
 from ..db.repo import SupabaseRepo
-from ..services.storage import MAX_UPLOAD_BYTES, upload_pdf
+from ..guardrails import enforce_ingest_guardrails
+from ..services.storage import MAX_UPLOAD_BYTES, canonical_pdf_storage_path, upload_pdf
 from ..utils.deps import get_user_id
 from ..utils.arxiv_url import normalize_arxiv_url
 
@@ -85,6 +86,8 @@ async def ingest_enqueue(
     url_value = content if request.type in ("pdf_url", "url") else None
     if request.type == "pdf_url" and url_value:
         url_value = normalize_arxiv_url(url_value)
+    repo = SupabaseRepo()
+    await asyncio.to_thread(enforce_ingest_guardrails, repo, user_id)
     source_id = await asyncio.to_thread(
         _upsert_source_pending,
         user_id,
@@ -92,7 +95,6 @@ async def ingest_enqueue(
         url_value,
         request.title,
     )
-    repo = SupabaseRepo()
     job_id = repo.create_job(user_id=user_id, job_type="ingest", source_id=source_id)
     return IngestEnqueueResponse(job_id=job_id, status="queued")
 
@@ -114,9 +116,10 @@ async def ingest_file(
             detail=f"File too large (max {MAX_PDF_FILE_BYTES // (1024*1024)}MB)",
         )
     repo = SupabaseRepo()
+    await asyncio.to_thread(enforce_ingest_guardrails, repo, user_id)
     user_uuid = repo._get_or_create_user_id(user_id)
     source_id = await asyncio.to_thread(repo.insert_source_pdf_file, user_id, title or None)
-    storage_path = f"{user_uuid}/{source_id}.pdf"
+    storage_path = canonical_pdf_storage_path(user_uuid, source_id)
     try:
         await asyncio.to_thread(upload_pdf, storage_path, body)
     except RuntimeError as e:

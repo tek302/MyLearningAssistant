@@ -7,10 +7,6 @@ import retrofit2.http.GET
 import retrofit2.http.Path
 import retrofit2.http.Query
 
-/**
- * Backend recommendations API (GET /recommendations, DELETE /recommendations/{id}).
- * Requires Authorization: Bearer <token>.
- */
 interface RecommendationsApi {
 
     @GET("recommendations")
@@ -22,6 +18,9 @@ interface RecommendationsApi {
 
     @DELETE("recommendations/{id}")
     suspend fun delete(@Path("id") id: String): Response<Unit>
+
+    @GET("recommendations/{id}/explanation")
+    suspend fun getExplanation(@Path("id") id: String): Response<ExplanationResponse>
 
     data class ListResponse(
         val recommendations: List<RecommendationItem>
@@ -37,5 +36,31 @@ interface RecommendationsApi {
         val source: String,
         val score: Float?,
         @SerializedName("created_at") val createdAt: String?
+    )
+
+    data class ExplanationResponse(
+        @SerializedName("recommendation_id") val recommendationId: String,
+        @SerializedName("week_start") val weekStart: String?,
+        val stage: String?,
+        @SerializedName("triggering_keywords") val triggeringKeywords: List<TriggeringKeyword>?,
+        @SerializedName("score_breakdown") val scoreBreakdown: ScoreBreakdown?,
+        val meta: ExplanationMeta?
+    )
+
+    data class TriggeringKeyword(
+        val keyword: String,
+        val weight: Float?,
+        val contribution: String?
+    )
+
+    data class ScoreBreakdown(
+        @SerializedName("final_score") val finalScore: Float?,
+        @SerializedName("keyword_match") val keywordMatch: Float?
+    )
+
+    data class ExplanationMeta(
+        val source: String?,
+        @SerializedName("run_id") val runId: String?,
+        @SerializedName("prompt_version") val promptVersion: String?
     )
 }

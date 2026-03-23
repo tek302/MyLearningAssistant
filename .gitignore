@@ -101,5 +101,8 @@ Thumbs.db
 /Learning_Path_FastAPI_LangGraph_Supabase.pdf
 /gcloud_build_deploy_command.txt
 
+# Deploy scripts (contain project-specific config)
+scripts/
+
 # Orchestrator docs (keep locally, do not track or push)
 orchestrator/docs/*.md

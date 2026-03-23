@@ -6,7 +6,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.TrendingDown
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
@@ -15,10 +18,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.models.Recommendation
+import com.example.learning.agent.data.remote.KeywordsApi
 import com.example.learning.agent.data.repository.FeedbackRepository
 import com.example.learning.agent.data.repository.IngestRepository
+import com.example.learning.agent.data.repository.KeywordsRepository
 import com.example.learning.agent.data.repository.RecommendationsRepository
+import com.example.learning.agent.ui.components.AddKeywordDialog
 import com.example.learning.agent.ui.components.FeedbackBottomSheet
+import com.example.learning.agent.ui.components.KeywordProfileManageList
 import com.example.learning.agent.ui.components.RecommendationCard
 import com.example.learning.agent.ui.theme.TekLearningAgentTheme
 import kotlinx.coroutines.launch
@@ -29,13 +36,24 @@ private data class RecommendationFeedbackDraft(
     val action: String,
 )
 
+private fun recommendationMatchesKeyword(rec: Recommendation, keyword: String): Boolean {
+    val k = keyword.lowercase()
+    if (rec.title.lowercase().contains(k)) return true
+    val abs = rec.abstract?.lowercase().orEmpty()
+    return abs.contains(k)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecommendationsScreen(
     modifier: Modifier = Modifier
 ) {
     var selectedWeek by remember { mutableStateOf("All") }
-    var selectedTopic by remember { mutableStateOf<String?>(null) }
+    var selectedKeywordFilter by remember { mutableStateOf<String?>(null) }
+
+    var keywordItems by remember { mutableStateOf<List<KeywordsApi.KeywordItem>>(emptyList()) }
+    var suggestions by remember { mutableStateOf<List<KeywordsApi.SuggestionItem>>(emptyList()) }
+
     var recommendations by remember { mutableStateOf<List<Recommendation>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var isRefreshing by remember { mutableStateOf(false) }
@@ -45,8 +63,25 @@ fun RecommendationsScreen(
     var feedbackDraft by remember { mutableStateOf<RecommendationFeedbackDraft?>(null) }
     var feedbackByRecommendationId by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var feedbackSubmittingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    var showKeywordManageSheet by remember { mutableStateOf(false) }
+    var showAddKeywordDialog by remember { mutableStateOf(false) }
+
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    val filterChipsKeywords = remember(keywordItems) {
+        keywordItems
+            .filter { it.status == "active" || it.status == "declining" }
+            .sortedByDescending { it.status == "active" }
+    }
+
+    val displayedRecommendations = remember(recommendations, selectedKeywordFilter) {
+        val f = selectedKeywordFilter
+        if (f.isNullOrBlank()) recommendations
+        else recommendations.filter { recommendationMatchesKeyword(it, f) }
+    }
 
     fun weekStartForLabel(label: String): String? = when (label) {
         "This Week" -> getWeekStartMonday(0)
@@ -59,17 +94,24 @@ fun RecommendationsScreen(
             if (isRefreshing) return
             isRefreshing = true
         } else {
-            // Allow first load when recommendations is empty; skip only if already loading and we have data (prevent duplicate load)
             if (isLoading && recommendations.isNotEmpty()) return
             isLoading = true
         }
         loadError = null
         scope.launch {
             try {
+                when (val kwResult = KeywordsRepository.listKeywords()) {
+                    is KeywordsRepository.Result.Success -> keywordItems = kwResult.data.items
+                    is KeywordsRepository.Result.Error -> { /* keep previous */ }
+                }
+                when (val sugResult = KeywordsRepository.listSuggestions(status = "pending")) {
+                    is KeywordsRepository.Result.Success -> suggestions = sugResult.data
+                    is KeywordsRepository.Result.Error -> { /* keep previous */ }
+                }
                 val weekStart = weekStartForLabel(selectedWeek)
                 when (val r = RecommendationsRepository.list(
                     weekStart = weekStart,
-                    topicName = selectedTopic,
+                    topicName = null,
                     limit = 50
                 )) {
                     is RecommendationsRepository.ListResult.Success -> {
@@ -87,12 +129,8 @@ fun RecommendationsScreen(
         }
     }
 
-    LaunchedEffect(selectedWeek, selectedTopic) {
+    LaunchedEffect(selectedWeek) {
         loadRecommendations()
-    }
-
-    val topics = remember(recommendations) {
-        recommendations.map { it.topicName }.distinct().sorted()
     }
 
     PullToRefreshBox(
@@ -101,176 +139,374 @@ fun RecommendationsScreen(
         modifier = modifier.fillMaxSize()
     ) {
         Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) }
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            floatingActionButton = {
+                ExtendedFloatingActionButton(
+                    onClick = { showKeywordManageSheet = true },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    text = { Text("Keywords") }
+                )
+            }
         ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .padding(16.dp)
-        ) {
-            // Week dropdown
-            var expandedWeek by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(
-                expanded = expandedWeek,
-                onExpandedChange = { expandedWeek = !expandedWeek },
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 16.dp)
+                    .fillMaxSize()
+                    .padding(paddingValues)
+                    .padding(16.dp)
             ) {
-                OutlinedTextField(
-                    value = selectedWeek,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("Time Range") },
-                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedWeek) },
+                var expandedWeek by remember { mutableStateOf(false) }
+                ExposedDropdownMenuBox(
+                    expanded = expandedWeek,
+                    onExpandedChange = { expandedWeek = !expandedWeek },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .menuAnchor()
-                )
-                ExposedDropdownMenu(
-                    expanded = expandedWeek,
-                    onDismissRequest = { expandedWeek = false }
+                        .padding(bottom = 12.dp)
                 ) {
-                    listOf("All", "This Week", "Last Week").forEach { week ->
-                        DropdownMenuItem(
-                            text = { Text(week) },
+                    OutlinedTextField(
+                        value = selectedWeek,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Time Range") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedWeek) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = expandedWeek,
+                        onDismissRequest = { expandedWeek = false }
+                    ) {
+                        listOf("All", "This Week", "Last Week").forEach { week ->
+                            DropdownMenuItem(
+                                text = { Text(week) },
+                                onClick = {
+                                    selectedWeek = week
+                                    expandedWeek = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Filter by keyword",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    TextButton(onClick = { showKeywordManageSheet = true }) {
+                        Text("Manage")
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    FilterChip(
+                        selected = selectedKeywordFilter == null,
+                        onClick = { selectedKeywordFilter = null },
+                        label = { Text("All") }
+                    )
+                    filterChipsKeywords.forEach { kw ->
+                        val label = kw.keyword.let { t ->
+                            if (t.length > 22) t.take(22) + "…" else t
+                        }
+                        FilterChip(
+                            selected = selectedKeywordFilter == kw.keyword,
                             onClick = {
-                                selectedWeek = week
-                                expandedWeek = false
-                            }
+                                selectedKeywordFilter =
+                                    if (selectedKeywordFilter == kw.keyword) null else kw.keyword
+                            },
+                            label = { Text(label) },
+                            leadingIcon = if (kw.status == "declining") {
+                                {
+                                    Icon(
+                                        Icons.Filled.TrendingDown,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            } else null
                         )
                     }
-                }
-            }
-
-            // Topic chips
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(bottom = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                FilterChip(
-                    selected = selectedTopic == null,
-                    onClick = { selectedTopic = null },
-                    label = { Text("All") }
-                )
-                topics.forEach { topic ->
-                    FilterChip(
-                        selected = selectedTopic == topic,
-                        onClick = {
-                            selectedTopic = if (selectedTopic == topic) null else topic
-                        },
-                        label = { Text(topic) }
-                    )
-                }
-            }
-
-            when {
-                isLoading && recommendations.isEmpty() -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator()
+                    if (filterChipsKeywords.isEmpty()) {
+                        FilledTonalButton(
+                            onClick = { showAddKeywordDialog = true },
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Add keyword")
+                        }
                     }
                 }
-                loadError != null && recommendations.isEmpty() -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
+
+                if (suggestions.isNotEmpty()) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                        )
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = loadError ?: "Error",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Button(onClick = { loadRecommendations() }) {
-                                Icon(Icons.Default.Refresh, contentDescription = null)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Retry")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    "${suggestions.size} new keyword suggestions",
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                Text(
+                                    "Open Manage to accept or skip.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            TextButton(onClick = { showKeywordManageSheet = true }) {
+                                Text("Review")
                             }
                         }
                     }
                 }
-                recommendations.isEmpty() -> {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "No recommendations yet. Complete an S2 weekly summary to get arXiv suggestions.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+
+                when {
+                    isLoading && recommendations.isEmpty() -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator()
+                        }
                     }
-                }
-                else -> {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 8.dp)
-                    ) {
-                        items(recommendations) { rec ->
-                            RecommendationCard(
-                                recommendation = rec,
-                                onThumbsUp = {
-                                    if (rec.id !in feedbackSubmittingIds) {
-                                        feedbackDraft = RecommendationFeedbackDraft(rec, FeedbackRepository.ACTION_THUMBS_UP)
-                                    }
-                                },
-                                onThumbsDown = {
-                                    if (rec.id !in feedbackSubmittingIds) {
-                                        feedbackDraft = RecommendationFeedbackDraft(rec, FeedbackRepository.ACTION_THUMBS_DOWN)
-                                    }
-                                },
-                                feedbackAction = feedbackByRecommendationId[rec.id],
-                                feedbackSubmitting = rec.id in feedbackSubmittingIds,
-                                onProcess = {
-                                    if (processInProgress == rec.id) return@RecommendationCard
-                                    processInProgress = rec.id
-                                    scope.launch {
-                                        when (val ingest = IngestRepository.ingestUrl(rec.url, rec.title)) {
-                                            is IngestRepository.Result.Success -> {
-                                                val deleted = RecommendationsRepository.delete(rec.id)
-                                                if (deleted) {
-                                                    recommendations = recommendations - rec
-                                                    snackbarHostState.showSnackbar("Queued for ingest. Removed from list.")
-                                                } else {
-                                                    snackbarHostState.showSnackbar("Queued for ingest. Could not remove from list.")
+                    loadError != null && recommendations.isEmpty() -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = loadError ?: "Error",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Button(onClick = { loadRecommendations() }) {
+                                    Icon(Icons.Default.Refresh, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("Retry")
+                                }
+                            }
+                        }
+                    }
+                    recommendations.isEmpty() -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No recommendations yet. Add keywords and complete a weekly summary to get arXiv suggestions.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    displayedRecommendations.isEmpty() -> {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No papers match \"$selectedKeywordFilter\" in title or abstract. Try another keyword or All.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    else -> {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(vertical = 8.dp)
+                        ) {
+                            items(displayedRecommendations) { rec ->
+                                RecommendationCard(
+                                    recommendation = rec,
+                                    onThumbsUp = {
+                                        if (rec.id !in feedbackSubmittingIds) {
+                                            feedbackDraft = RecommendationFeedbackDraft(
+                                                rec,
+                                                FeedbackRepository.ACTION_THUMBS_UP
+                                            )
+                                        }
+                                    },
+                                    onThumbsDown = {
+                                        if (rec.id !in feedbackSubmittingIds) {
+                                            feedbackDraft = RecommendationFeedbackDraft(
+                                                rec,
+                                                FeedbackRepository.ACTION_THUMBS_DOWN
+                                            )
+                                        }
+                                    },
+                                    feedbackAction = feedbackByRecommendationId[rec.id],
+                                    feedbackSubmitting = rec.id in feedbackSubmittingIds,
+                                    onProcess = {
+                                        if (processInProgress == rec.id) return@RecommendationCard
+                                        processInProgress = rec.id
+                                        scope.launch {
+                                            when (val ingest = IngestRepository.ingestUrl(rec.url, rec.title)) {
+                                                is IngestRepository.Result.Success -> {
+                                                    val deleted = RecommendationsRepository.delete(rec.id)
+                                                    if (deleted) {
+                                                        recommendations = recommendations - rec
+                                                        snackbarHostState.showSnackbar("Queued for ingest. Removed from list.")
+                                                    } else {
+                                                        snackbarHostState.showSnackbar("Queued for ingest. Could not remove from list.")
+                                                    }
+                                                }
+                                                is IngestRepository.Result.Error -> {
+                                                    snackbarHostState.showSnackbar("Ingest failed: ${ingest.message}")
                                                 }
                                             }
-                                            is IngestRepository.Result.Error -> {
-                                                snackbarHostState.showSnackbar("Ingest failed: ${ingest.message}")
+                                            processInProgress = null
+                                        }
+                                    },
+                                    onRemove = {
+                                        if (removeInProgress == rec.id) return@RecommendationCard
+                                        removeInProgress = rec.id
+                                        scope.launch {
+                                            val deleted = RecommendationsRepository.delete(rec.id)
+                                            if (deleted) {
+                                                recommendations = recommendations - rec
+                                                snackbarHostState.showSnackbar("Removed from list.")
+                                            } else {
+                                                snackbarHostState.showSnackbar("Could not remove.")
                                             }
+                                            removeInProgress = null
                                         }
-                                        processInProgress = null
                                     }
-                                },
-                                onRemove = {
-                                    if (removeInProgress == rec.id) return@RecommendationCard
-                                    removeInProgress = rec.id
-                                    scope.launch {
-                                        val deleted = RecommendationsRepository.delete(rec.id)
-                                        if (deleted) {
-                                            recommendations = recommendations - rec
-                                            snackbarHostState.showSnackbar("Removed from list.")
-                                        } else {
-                                            snackbarHostState.showSnackbar("Could not remove.")
-                                        }
-                                        removeInProgress = null
-                                    }
-                                }
-                            )
+                                )
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    if (showKeywordManageSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showKeywordManageSheet = false },
+            sheetState = sheetState
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                Text(
+                    "Keywords & suggestions",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+                KeywordProfileManageList(
+                    keywords = keywordItems,
+                    suggestions = suggestions,
+                    onAcceptSuggestion = { suggestion ->
+                        scope.launch {
+                            when (val r = KeywordsRepository.acceptSuggestion(suggestion.id)) {
+                                is KeywordsRepository.Result.Success -> {
+                                    suggestions = suggestions.filter { it.id != suggestion.id }
+                                    when (val kwResult = KeywordsRepository.listKeywords()) {
+                                        is KeywordsRepository.Result.Success ->
+                                            keywordItems = kwResult.data.items
+                                        else -> {}
+                                    }
+                                    snackbarHostState.showSnackbar("Added: ${suggestion.keyword}")
+                                }
+                                is KeywordsRepository.Result.Error ->
+                                    snackbarHostState.showSnackbar("Failed: ${r.message}")
+                            }
+                        }
+                    },
+                    onRejectSuggestion = { suggestion ->
+                        scope.launch {
+                            when (val r = KeywordsRepository.rejectSuggestion(suggestion.id)) {
+                                is KeywordsRepository.Result.Success -> {
+                                    suggestions = suggestions.filter { it.id != suggestion.id }
+                                    snackbarHostState.showSnackbar("Skipped: ${suggestion.keyword}")
+                                }
+                                is KeywordsRepository.Result.Error ->
+                                    snackbarHostState.showSnackbar("Failed: ${r.message}")
+                            }
+                        }
+                    },
+                    onArchiveKeyword = { kw ->
+                        scope.launch {
+                            when (KeywordsRepository.archiveKeyword(kw.id)) {
+                                is KeywordsRepository.Result.Success -> {
+                                    keywordItems = keywordItems.filter { it.id != kw.id }
+                                    if (selectedKeywordFilter == kw.keyword) selectedKeywordFilter = null
+                                    snackbarHostState.showSnackbar("Archived: ${kw.keyword}")
+                                }
+                                is KeywordsRepository.Result.Error ->
+                                    snackbarHostState.showSnackbar("Could not archive")
+                            }
+                        }
+                    }
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Button(onClick = { showAddKeywordDialog = true }) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Add keyword")
+                    }
+                }
+            }
+        }
+    }
+
+    if (showAddKeywordDialog) {
+        AddKeywordDialog(
+            onDismiss = { showAddKeywordDialog = false },
+            onAdd = { keyword ->
+                showAddKeywordDialog = false
+                scope.launch {
+                    when (val r = KeywordsRepository.createKeyword(keyword)) {
+                        is KeywordsRepository.Result.Success -> {
+                            when (val kwResult = KeywordsRepository.listKeywords()) {
+                                is KeywordsRepository.Result.Success ->
+                                    keywordItems = kwResult.data.items
+                                else -> {}
+                            }
+                            snackbarHostState.showSnackbar("Added: $keyword")
+                        }
+                        is KeywordsRepository.Result.Error -> {
+                            snackbarHostState.showSnackbar(
+                                if ("409" in r.message || "already exists" in r.message.lowercase())
+                                    "Keyword already exists"
+                                else "Failed: ${r.message}"
+                            )
+                        }
+                    }
+                }
+            }
+        )
+    }
+
     if (feedbackDraft != null) {
         val draft = feedbackDraft!!
         FeedbackBottomSheet(
@@ -317,7 +553,6 @@ fun RecommendationsScreen(
                 }
             }
         )
-    }
     }
 }
 

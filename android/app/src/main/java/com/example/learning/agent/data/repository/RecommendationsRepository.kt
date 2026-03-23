@@ -62,6 +62,26 @@ object RecommendationsRepository {
         }
     }
 
+    sealed class ExplanationResult {
+        data class Success(val data: RecommendationsApi.ExplanationResponse) : ExplanationResult()
+        data class Error(val message: String) : ExplanationResult()
+    }
+
+    suspend fun getExplanation(id: String): ExplanationResult = withContext(Dispatchers.IO) {
+        try {
+            val response = api.getExplanation(id)
+            if (response.isSuccessful && response.body() != null) {
+                ExplanationResult.Success(response.body()!!)
+            } else {
+                ExplanationResult.Error(response.errorBody()?.string() ?: "HTTP ${response.code()}")
+            }
+        } catch (e: IOException) {
+            ExplanationResult.Error("Network error: ${e.message}")
+        } catch (e: Exception) {
+            ExplanationResult.Error("Error: ${e.message}")
+        }
+    }
+
     /** Delete one recommendation. Returns true if successful (204). */
     suspend fun delete(id: String): Boolean = withContext(Dispatchers.IO) {
         try {

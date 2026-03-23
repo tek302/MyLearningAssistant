@@ -1,6 +1,7 @@
 package com.example.learning.agent.ui.components
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ThumbDown
 import androidx.compose.material.icons.filled.ThumbUp
@@ -11,6 +12,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.remote.S2Api
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun WeeklySummaryCard(
     summary: S2Api.S2SummaryItem,
@@ -23,10 +25,13 @@ fun WeeklySummaryCard(
     isReprocessing: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    val weekLabel = summary.extra?.weekStart?.let { "Week of $it" }
+    val periodLine = formatS2PeriodLine(summary.extra)
+    val weekLabel = periodLine
+        ?: summary.extra?.weekStart?.let { "Week of $it" }
         ?: summary.extra?.topicName ?: "This Week"
+    val sections = summary.extra?.sections?.filter { it.insights.isNotEmpty() }.orEmpty()
+    val isV2 = sections.isNotEmpty()
     val bullets = summary.bullets?.filter { it.isNotBlank() }.orEmpty()
-    val showBullets = bullets.take(3)
 
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -55,34 +60,72 @@ fun WeeklySummaryCard(
                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
                 )
             }
-            showBullets.forEach { bullet ->
-                Row(
-                    modifier = Modifier.padding(vertical = 2.dp),
-                    horizontalArrangement = Arrangement.Start
+
+            if (isV2) {
+                // v2: keyword chips
+                FlowRow(
+                    modifier = Modifier.padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    sections.take(5).forEach { sec ->
+                        AssistChip(
+                            onClick = onOpen,
+                            label = {
+                                Text(
+                                    text = "${sec.keyword} (${sec.docCount})",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        )
+                    }
+                }
+                // v2: reflection preview
+                summary.extra?.reflection?.takeIf { it.isNotBlank() }?.let { refl ->
                     Text(
-                        text = "• ",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = bullet,
+                        text = refl,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            } else {
+                // v1 fallback: bullet list
+                val showBullets = bullets.take(3)
+                showBullets.forEach { bullet ->
+                    Row(
+                        modifier = Modifier.padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.Start
+                    ) {
+                        Text(
+                            text = "• ",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = bullet,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+                if (bullets.size > 3) {
+                    Text(
+                        text = "+${bullets.size - 3} more",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        modifier = Modifier.padding(top = 4.dp)
                     )
                 }
             }
-            if (bullets.size > 3) {
-                Text(
-                    text = "+${bullets.size - 3} more",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
+
             Spacer(modifier = Modifier.height(12.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
