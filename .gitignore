@@ -97,8 +97,8 @@ Thumbs.db
 *~
 
 # Root-level doc/plan md + pdf (keep locally, do not track or push)
-/*.md
-/Learning_Path_FastAPI_LangGraph_Supabase.pdf
+/*.pdf
+/*.code-workspace
 /gcloud_build_deploy_command.txt
 
 # Deploy scripts (contain project-specific config)
