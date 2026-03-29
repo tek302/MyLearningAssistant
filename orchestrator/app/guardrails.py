@@ -45,7 +45,7 @@ def enforce_ingest_guardrails(repo: SupabaseRepo, user_id: str) -> None:
 
 
 def enforce_s2_guardrails(repo: SupabaseRepo, user_id: str) -> None:
-    """Reject new S2 enqueue when there is already an active S2 job or the last job was too recent."""
+    """Reject new S2 enqueue when there is already an active S2 job or the last *successful* job was too recent."""
     max_active = max_active_s2_jobs_per_user()
     if max_active > 0:
         active = repo.count_jobs_for_user(user_id, job_type="s2", states=["queued", "running"])
@@ -58,7 +58,9 @@ def enforce_s2_guardrails(repo: SupabaseRepo, user_id: str) -> None:
     min_interval = min_s2_job_interval_seconds()
     if min_interval <= 0:
         return
-    latest = repo.get_latest_job_created_at_for_user(user_id, job_type="s2")
+    latest = repo.get_latest_job_created_at_for_user(
+        user_id, job_type="s2", exclude_states=["failed"],
+    )
     if latest is None:
         return
     if latest.tzinfo is None:

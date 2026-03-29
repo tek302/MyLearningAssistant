@@ -1,5 +1,6 @@
--- Supabase SQL editor용 feedback_events 초기 스키마
--- Copy & paste into SQL editor.
+-- Legacy reference only.
+-- Canonical migration location: orchestrator/sql/53_schema_alpha_feedback_memory.sql
+-- Keep this file for historical context; do not treat as source-of-truth.
 
 create extension if not exists pgcrypto;
 

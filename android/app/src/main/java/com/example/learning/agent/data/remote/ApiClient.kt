@@ -12,7 +12,7 @@ object ApiClient {
 
     private val okHttp = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
         .addInterceptor(AuthInterceptor())
         .apply {
             if (BuildConfig.DEBUG) {

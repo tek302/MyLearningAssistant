@@ -2,4 +2,29 @@
     <string name="app_name">TekLearningAgent</string>
     <!-- Replace with your Firebase Web client ID (Project settings > Your apps > Web app). -->
     <string name="default_web_client_id" translatable="false">YOUR_WEB_CLIENT_ID.apps.googleusercontent.com</string>
+    <string name="ask_answer_title">Answer</string>
+    <string name="ask_sources_title">Sources</string>
+    <string name="ask_sources_empty">No citations were returned for this answer.</string>
+    <string name="ask_source_item_title">[%1$d] %2$s</string>
+    <string name="ask_source_untitled">Untitled source</string>
+    <string name="ask_open_source_link">Open source link</string>
+    <string name="ask_open_link_failed">Failed to open link.</string>
+    <string name="ask_run_id_label">run_id: %1$s</string>
+    <string name="ask_run_id_copied">run_id copied</string>
+    <string name="ask_feedback_title">How was this answer?</string>
+    <string name="ask_feedback_thumbs_up">Helpful</string>
+    <string name="ask_feedback_thumbs_down">Not helpful</string>
+    <string name="ask_feedback_comment_label">Optional comment</string>
+    <string name="ask_feedback_submit">Submit feedback</string>
+    <string name="ask_feedback_submitting">Submitting…</string>
+    <string name="ask_feedback_submit_success">Feedback submitted. Thanks!</string>
+    <string name="ask_feedback_submit_failed">Failed to submit feedback.</string>
+    <string name="ask_feedback_missing_run_id">run_id is missing for this answer.</string>
+    <string name="onboarding_title">Welcome to Learning Agent</string>
+    <string name="onboarding_body">Start in under 3 minutes with this simple flow.</string>
+    <string name="onboarding_step_1">1) Add your first document in Feed.</string>
+    <string name="onboarding_step_2">2) Ask questions in Ask and verify with sources.</string>
+    <string name="onboarding_step_3">3) Review Weekly summary for what to study next.</string>
+    <string name="onboarding_cta_start">Add first document</string>
+    <string name="onboarding_cta_skip">Skip</string>
 </resources>

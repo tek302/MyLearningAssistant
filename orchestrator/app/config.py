@@ -111,27 +111,9 @@ def get_judge_enabled() -> bool:
 
 
 def get_judge_model() -> str:
-    """
-    Get judge model from environment variable.
-    
-    Defaults to existing cheap model setting if present (e.g., from SUMMARY_MODEL),
-    otherwise uses a placeholder string.
-    
-    Returns:
-        str: Model name for judge evaluation
-    """
-    # Try JUDGE_MODEL first
-    judge_model = os.getenv("JUDGE_MODEL")
-    if judge_model:
-        return judge_model
-    
-    # Fallback to SUMMARY_MODEL if available (cheap model)
-    summary_model = os.getenv("SUMMARY_MODEL")
-    if summary_model:
-        return summary_model
-    
-    # Default placeholder (can be overridden by env)
-    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    """Resolve judge model via the central llm_client config."""
+    from app.utils.llm_client import get_model
+    return get_model("rag_judge")
 
 
 def get_judge_threshold_overall() -> float:

@@ -25,6 +25,7 @@ import com.example.learning.agent.data.repository.DocumentsRepository
 import com.example.learning.agent.data.repository.DocumentsCache
 import com.example.learning.agent.data.repository.RefreshAndHighlightPrefs
 import com.example.learning.agent.data.repository.IngestRepository
+import com.example.learning.agent.data.repository.OnboardingPrefs
 import com.example.learning.agent.data.repository.TriggerRepository
 import com.example.learning.agent.data.remote.ApiClient
 import com.example.learning.agent.data.remote.NotesApi
@@ -122,11 +123,43 @@ fun FeedScreen(
         RefreshAndHighlightPrefs.setKnownDocumentIds(context, known + currentIds)
     }
 
-    fun shortMessageForErrorCode(errorCode: String?, fullError: String?): String = when (errorCode) {
-        "fetch_403" -> "Access denied (403). Some sites block server requests."
-        "fetch_404" -> "Page not found (404)."
-        "timeout" -> "Request timed out."
-        else -> fullError?.lineSequence()?.firstOrNull()?.take(120) ?: "Something went wrong."
+    /**
+     * Prefer stable backend [failCode] (sources.fail_code), then derived [errorCode] from job error text,
+     * then first line of [fullError].
+     */
+    fun shortIngestFailureMessage(failCode: String?, errorCode: String?, fullError: String?): String {
+        when (failCode?.trim()?.uppercase()) {
+            "FETCH_TIMEOUT" -> return "Download timed out. Try again or use a smaller file."
+            "PDF_TOO_LARGE" -> return "PDF exceeds size limit on the server."
+            "PDF_TOO_LONG" -> return "PDF has too many pages for the server limit."
+            "PDF_NO_TEXT" -> return "No extractable text in this PDF (e.g. scanned image). Try another file."
+            "PDF_PARSE_ERROR" -> return "Could not read this PDF."
+            "PDF_PROCESS_ERROR" -> {
+                val line = fullError?.lineSequence()?.firstOrNull()?.take(120)?.trim()
+                return line?.takeIf { it.isNotEmpty() } ?: "PDF processing failed."
+            }
+            "STORAGE_FETCH_FAILED" -> return "Could not load the uploaded file. Try uploading again."
+            "MISSING_STORAGE_PATH" -> return "Upload storage misconfiguration."
+            "USER_MISMATCH" -> return "Permission error for this document."
+            "TEXT_NOT_SUPPORTED" -> return "This text ingest type is not supported."
+            "UNKNOWN_SOURCE_TYPE" -> return "Unsupported document type."
+            "URL_INGEST_ERROR" -> {
+                val line = fullError?.lineSequence()?.firstOrNull()?.take(120)?.trim()
+                return line?.takeIf { it.isNotEmpty() }
+                    ?: "Could not fetch or extract content from this URL."
+            }
+            null, "" -> { /* fall through */ }
+            else -> {
+                val line = fullError?.lineSequence()?.firstOrNull()?.take(120)?.trim()
+                return line?.takeIf { it.isNotEmpty() } ?: "Ingest failed (${failCode})."
+            }
+        }
+        return when (errorCode) {
+            "fetch_403" -> "Access denied (403). Some sites block server requests."
+            "fetch_404" -> "Page not found (404)."
+            "timeout" -> "Request timed out."
+            else -> fullError?.lineSequence()?.firstOrNull()?.take(120) ?: "Something went wrong."
+        }
     }
 
     // When document list is loaded from API (or cache), push any failed docs into the failure queue
@@ -136,8 +169,9 @@ fun FeedScreen(
             if ((doc.status?.lowercase() ?: "") != "failed") continue
             addIngestFailure(
                 IngestFailureInfo(
-                    message = shortMessageForErrorCode(doc.fail_code, null),
-                    errorCode = doc.fail_code,
+                    message = shortIngestFailureMessage(doc.fail_code, null, null),
+                    errorCode = null,
+                    failCode = doc.fail_code,
                     sourceId = doc.id,
                     jobId = doc.job_id
                 )
@@ -342,6 +376,7 @@ fun FeedScreen(
                             when (r.status.state) {
                                 "done" -> {
                                     RefreshAndHighlightPrefs.removePendingIngestJobIdSync(context, jobId)
+                                    OnboardingPrefs.markFirstIngestCompletedSync(context)
                                     loadPage(0, append = false)
                                     snackbarHostState.showSnackbar("Added to your documents", withDismissAction = true)
                                     pendingClearPollingJobId = jobId
@@ -351,8 +386,13 @@ fun FeedScreen(
                                     RefreshAndHighlightPrefs.removePendingIngestJobIdSync(context, jobId)
                                     addIngestFailure(
                                         IngestFailureInfo(
-                                            message = shortMessageForErrorCode(r.status.errorCode, r.status.error),
+                                            message = shortIngestFailureMessage(
+                                                r.status.failCode,
+                                                r.status.errorCode,
+                                                r.status.error
+                                            ),
                                             errorCode = r.status.errorCode,
+                                            failCode = r.status.failCode,
                                             sourceId = r.status.sourceId,
                                             jobId = jobId
                                         )

@@ -106,3 +106,4 @@ scripts/
 
 # Orchestrator docs (keep locally, do not track or push)
 orchestrator/docs/*.md
+orchestrator/docs/alpha/*.md

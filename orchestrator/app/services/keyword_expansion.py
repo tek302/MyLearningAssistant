@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.db.repo import SupabaseRepo
+from app.utils.llm_client import get_chat_client, get_model
 
 logger = logging.getLogger(__name__)
 
@@ -17,16 +18,6 @@ MAX_SUGGESTIONS_PER_WEEK = 3
 REJECT_COOLDOWN_DAYS = 30
 NOTES_DAYS = 30
 NOTES_LIMIT = 30
-
-try:
-    from openai import OpenAI
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
-
-
-def _get_model() -> str:
-    return os.getenv("SUMMARY_MODEL", "gpt-4o-mini")
 
 
 def _build_stage1_prompt(
@@ -78,9 +69,6 @@ def run_keyword_expansion(
     Run Stage 1 keyword expansion for a user.
     Returns (list of suggestion ids, error_message or None).
     """
-    if not HAS_OPENAI:
-        return [], "openai not installed"
-
     repo = repo or SupabaseRepo()
 
     keywords = repo.list_user_keywords(user_id, status="active")
@@ -118,13 +106,13 @@ def run_keyword_expansion(
         week_start=week_start,
         stage="stage1",
         keyword_snapshot=keyword_snapshot,
-        meta={"prompt_version": "stage1-v1", "model": _get_model()},
+        meta={"prompt_version": "stage1-v1", "model": get_model("keyword_expansion")},
     )
 
     try:
-        client = OpenAI()
+        client = get_chat_client()
         response = client.chat.completions.create(
-            model=_get_model(),
+            model=get_model("keyword_expansion"),
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=500,

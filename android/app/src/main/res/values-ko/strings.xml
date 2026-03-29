@@ -1,0 +1,27 @@
+<resources>
+    <string name="ask_answer_title">답변</string>
+    <string name="ask_sources_title">출처</string>
+    <string name="ask_sources_empty">이 답변에는 표시할 citation이 없습니다.</string>
+    <string name="ask_source_item_title">[%1$d] %2$s</string>
+    <string name="ask_source_untitled">제목 없는 출처</string>
+    <string name="ask_open_source_link">원문 링크 열기</string>
+    <string name="ask_open_link_failed">링크를 열 수 없습니다.</string>
+    <string name="ask_run_id_label">run_id: %1$s</string>
+    <string name="ask_run_id_copied">run_id가 복사되었습니다</string>
+    <string name="ask_feedback_title">이 답변이 도움이 되었나요?</string>
+    <string name="ask_feedback_thumbs_up">도움됨</string>
+    <string name="ask_feedback_thumbs_down">도움 안 됨</string>
+    <string name="ask_feedback_comment_label">추가 코멘트 (선택)</string>
+    <string name="ask_feedback_submit">피드백 제출</string>
+    <string name="ask_feedback_submitting">제출 중…</string>
+    <string name="ask_feedback_submit_success">피드백이 저장되었습니다. 감사합니다!</string>
+    <string name="ask_feedback_submit_failed">피드백 저장에 실패했습니다.</string>
+    <string name="ask_feedback_missing_run_id">이 답변의 run_id가 없어 제출할 수 없습니다.</string>
+    <string name="onboarding_title">Learning Agent 시작하기</string>
+    <string name="onboarding_body">3분 안에 핵심 흐름을 시작할 수 있습니다.</string>
+    <string name="onboarding_step_1">1) Feed에서 첫 문서를 추가합니다.</string>
+    <string name="onboarding_step_2">2) Ask에서 질문하고 출처(Sources)를 확인합니다.</string>
+    <string name="onboarding_step_3">3) Weekly에서 다음 학습 방향을 확인합니다.</string>
+    <string name="onboarding_cta_start">첫 문서 추가하기</string>
+    <string name="onboarding_cta_skip">건너뛰기</string>
+</resources>

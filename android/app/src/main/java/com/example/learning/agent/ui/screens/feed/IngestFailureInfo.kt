@@ -7,6 +7,8 @@ package com.example.learning.agent.ui.screens.feed
 data class IngestFailureInfo(
     val message: String,
     val errorCode: String?,
+    /** Backend `sources.fail_code` when known (mirrors GET /ingest/status). */
+    val failCode: String? = null,
     val sourceId: String? = null,
     val jobId: String? = null
 )

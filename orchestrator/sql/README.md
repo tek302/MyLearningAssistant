@@ -26,6 +26,9 @@
    -- orchestrator/sql/50_schema_jobs.sql 파일 내용 실행
    -- 5. Jobs payload (S2 등): 51_jobs_payload.sql
    -- 6. Recommendations (주간 arXiv 추천): 52_schema_recommendations.sql
+   -- 7. Alpha memory/feedback 통합 스키마: 53_schema_alpha_feedback_memory.sql
+   -- 8. feedback_events target 확장(rag_answer): 54_feedback_events_rag_answer.sql
+   -- 9. feedback_events action 확장(process/remove): 55_feedback_events_action_process_remove.sql
    ```
 
    또는 Supabase CLI를 사용하는 경우:
@@ -52,10 +55,17 @@
 - **rag_events** (선택사항): RAG 이벤트 로그
 - **jobs** (Week6): 비동기 인제스트 작업 (queued/running/done/failed)
 - **recommendations**: 주간 arXiv 추천 (title, abstract, 원문 url; Process 시에만 ingest)
+- **notes**: 사용자 노트 (recommendation/S2 personalization 입력 신호)
+- **feedback_events**: S1/S2/recommendation/RAG answer 피드백 이벤트 로그
+- **user_keywords**: keyword-anchored user profile 상태 (가중치/상태/피드백 카운트)
+- **keyword_suggestions**: Stage 1 keyword suggestion 및 accept/reject 이력
+- **recommendation_generation_runs**: Stage 1/2 추천 실행 로그 및 explanation 근거
+- **user_interest_profiles**: (선택) profile snapshot 보관 테이블
 
 ## 주의사항
 
 - `users` 테이블은 반드시 먼저 생성되어야 합니다 (다른 테이블이 참조)
 - `vector` 확장은 pgvector를 사용하기 위해 필요합니다
 - 프로덕션 환경에서는 RLS (Row Level Security) 정책을 설정해야 합니다
+- 기존 `orchestrator/docs/feedback_events.sql`은 레거시 참조용이며, 현재 canonical DDL은 `orchestrator/sql/53_schema_alpha_feedback_memory.sql`입니다
 

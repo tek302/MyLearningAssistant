@@ -1,7 +1,8 @@
 """
 GET /ingest/status?job_id=...: job state for async ingest (Week6).
 1 DB connection per request (resolve user + job SELECT in same connection).
-Returns state, progress, source_id, error (full message), error_code (simple code for 403/404/timeout).
+Returns state, progress, source_id, error (full message), error_code (simple code for 403/404/timeout),
+and fail_code from sources when the job is tied to a source (PDF/url pipeline).
 """
 import asyncio
 import logging
@@ -37,9 +38,11 @@ def _get_job_status_for_user(user_id: str, job_id: str):
             user_uuid = resolve_user_id(cur, user_id)
             cur.execute(
                 """
-                SELECT id, state, progress, source_id, error
-                FROM jobs
-                WHERE id = %s AND user_id = %s
+                SELECT j.id, j.state, j.progress, j.source_id, j.error, s.fail_code AS source_fail_code
+                FROM jobs j
+                LEFT JOIN sources s
+                  ON s.id = j.source_id AND s.user_id = j.user_id
+                WHERE j.id = %s AND j.user_id = %s
                 """,
                 (job_id, user_uuid),
             )
@@ -70,6 +73,9 @@ def _get_job_status_for_user(user_id: str, job_id: str):
             for k in ("id", "source_id"):
                 if out.get(k) is not None:
                     out[k] = str(out[k])
+            # Expose as fail_code for clients (matches sources.fail_code)
+            fc = out.pop("source_fail_code", None)
+            out["fail_code"] = fc if fc is None or fc == "" else str(fc)
             return out
 
 
@@ -79,8 +85,9 @@ async def get_ingest_status(
     job_id: str = Query(..., description="Job ID from POST /ingest"),
 ):
     """
-    Return job state: { state, progress, source_id, error?, error_code? }.
+    Return job state: { state, progress, source_id, error?, error_code?, fail_code? }.
     error_code is one of fetch_403, fetch_404, timeout, unknown (only when error is set).
+    fail_code is the sources.fail_code when present (e.g. PDF_TOO_LARGE, URL_INGEST_ERROR).
     Ownership enforced: job must belong to current user.
     """
     if not job_id:
@@ -95,6 +102,7 @@ async def get_ingest_status(
         "progress": job.get("progress", 0),
         "source_id": job.get("source_id"),
         "error": error,
+        "fail_code": job.get("fail_code"),
     }
     if error:
         out["error_code"] = _error_code_from_message(error)

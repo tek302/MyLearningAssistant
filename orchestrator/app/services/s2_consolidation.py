@@ -18,7 +18,8 @@ from zoneinfo import ZoneInfo
 import os
 
 from app.db.repo import SupabaseRepo
-from app.utils.summarization import create_s2_summary, create_s2_summary_v2, get_summary_model
+from app.utils.summarization import create_s2_summary, create_s2_summary_v2
+from app.utils.llm_client import get_model
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def get_s2_generation_meta() -> Dict[str, Any]:
     return {
         "prompt_version": _prompt_version(),
         "model_snapshot": {
-            "llm": get_summary_model(),
+            "llm": get_model("s2_summary"),
             "embedding_model": None,
         },
     }

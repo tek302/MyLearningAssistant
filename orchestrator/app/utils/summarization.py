@@ -4,19 +4,15 @@ import json
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
-try:
-    from openai import OpenAI
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
+from app.utils.llm_client import get_chat_client, get_model
 
 # Load environment variables
 load_dotenv()
 
 
 def get_summary_model() -> str:
-    """Get summary model from environment variable, defaulting to gpt-4o-mini."""
-    return os.getenv("SUMMARY_MODEL", "gpt-4o-mini")
+    """Backward-compat wrapper. Prefer get_model(purpose) for new code."""
+    return get_model("default")
 
 
 def get_s1_max_chunks() -> int:
@@ -47,16 +43,9 @@ def create_s1_summary(chunks_text: str, max_retries: int = 2) -> Dict[str, Any]:
         ValueError: If OpenAI is not installed or API key is missing
         RuntimeError: If summary creation fails after retries
     """
-    if not HAS_OPENAI:
-        raise ValueError("OpenAI package is not installed. Install with: pip install openai")
-    
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is not set")
-    
-    model = get_summary_model()
-    client = OpenAI(api_key=api_key)
-    
+    model = get_model("s1_summary")
+    client = get_chat_client()
+
     # Build prompt: one sentence + 3 key points for Feed (keep cards short)
     tldr_max = int(os.getenv("S1_TLDR_MAX_CHARS", str(S1_TLDR_MAX_CHARS)))
     bullets_count = int(os.getenv("S1_BULLETS_COUNT", str(S1_BULLETS_COUNT)))
@@ -146,13 +135,8 @@ def create_s2_summary(combined_s1_text: str, max_retries: int = 2) -> Dict[str, 
     One LLM call to produce a single tldr + 5--15 technical points for "this week".
     (v1 — kept for fallback when S2_SUMMARY_VERSION=v1)
     """
-    if not HAS_OPENAI:
-        raise ValueError("OpenAI package is not installed. Install with: pip install openai")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is not set")
-    model = get_summary_model()
-    client = OpenAI(api_key=api_key)
+    model = get_model("s2_summary")
+    client = get_chat_client()
     prompt = f"""You are summarizing the key technical points from multiple documents read this week.
 Below is a concatenation of one-sentence summaries and bullet points from each document.
 
@@ -354,13 +338,8 @@ def create_s2_summary_v2(
     S2 v2: keyword-conditioned, cross-week trajectory, cross-document connections.
     Returns dict with: tldr, bullets, sections, emerging_topics, connections, trajectory, reflection.
     """
-    if not HAS_OPENAI:
-        raise ValueError("OpenAI package is not installed. Install with: pip install openai")
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is not set")
-    model = get_summary_model()
-    client = OpenAI(api_key=api_key)
+    model = get_model("s2_summary")
+    client = get_chat_client()
     prompt = _build_s2_v2_prompt(s1_text, keywords, notes_text, feedback_text, prev_s2_text)
 
     last_error = None

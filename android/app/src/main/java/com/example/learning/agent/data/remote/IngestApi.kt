@@ -45,6 +45,8 @@ interface IngestApi {
         val progress: Int?,
         @SerializedName("source_id") val sourceId: String?,
         val error: String?,
-        @SerializedName("error_code") val errorCode: String?
+        @SerializedName("error_code") val errorCode: String?,
+        /** Backend `sources.fail_code` when the ingest job is tied to a source (e.g. PDF_TOO_LARGE, URL_INGEST_ERROR). */
+        @SerializedName("fail_code") val failCode: String? = null
     )
 }

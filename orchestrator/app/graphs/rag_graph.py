@@ -10,7 +10,7 @@ from langgraph.graph import StateGraph, END
 
 from ..db.repo import SupabaseRepo
 from ..utils.embeddings import create_embeddings
-from ..utils.summarization import get_summary_model
+from ..utils.llm_client import get_chat_client, get_model
 from ..rag.judge_schema import JudgeResult
 from ..config import (
     get_judge_enabled,
@@ -18,12 +18,6 @@ from ..config import (
     get_judge_threshold_faithfulness,
     get_judge_threshold_coverage
 )
-
-try:
-    from openai import OpenAI
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
 
 # Load environment variables
 load_dotenv()
@@ -38,7 +32,7 @@ MAX_QUOTE_LENGTH = 240
 # Module-level singleton repo (reduce repeated object creation)
 _REPO: Optional[SupabaseRepo] = None
 
-# Module-level cached OpenAI client (reduce repeated object creation)
+# Module-level cached chat client (reduce repeated object creation)
 _OPENAI_CLIENT: Optional[Any] = None
 
 
@@ -51,15 +45,10 @@ def _get_repo() -> SupabaseRepo:
 
 
 def _get_openai_client():
-    """Get or create module-level OpenAI client singleton."""
+    """Get or create module-level LLM client singleton (OpenAI or Gemini)."""
     global _OPENAI_CLIENT
     if _OPENAI_CLIENT is None:
-        if not HAS_OPENAI:
-            raise ValueError("OpenAI package is not installed. Install with: pip install openai")
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is not set")
-        _OPENAI_CLIENT = OpenAI(api_key=api_key)
+        _OPENAI_CLIENT = get_chat_client()
     return _OPENAI_CLIENT
 
 
@@ -524,7 +513,7 @@ def node_synthesize_answer(state: RAGState) -> RAGState:
         query = state["query"]
         context_text = state["context_text"]
         num_chunks = len(state["included_chunks"])
-        model = get_summary_model()
+        model = get_model("rag_synthesis")
         
         client = _get_openai_client()
         
@@ -727,7 +716,7 @@ def node_retry_synthesize(state: RAGState) -> RAGState:
         query = state["query"]
         context_text = state["context_text"]
         num_chunks = len(state["included_chunks"])
-        model = get_summary_model()
+        model = get_model("rag_retry")
         attempt = state.get("attempt", 1)
         eval_reasons = state.get("eval_reasons", [])
         
@@ -964,7 +953,7 @@ def node_no_results_finalize(state: RAGState) -> RAGState:
     """
     started_at = state["started_at"]
     latency_ms = int((time.time() - started_at) * 1000)
-    model = get_summary_model()
+    model = get_model("rag_synthesis")
     
     # Log run completion to ensure status doesn't remain 'running'
     _log_run_complete(_get_repo(), state.get("run_id"), latency_ms)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from typing import Annotated, Any, Optional
 
@@ -16,6 +17,7 @@ from ..services.s2_consolidation import get_s2_generation_meta
 from ..utils.deps import get_user_id
 
 router = APIRouter(prefix="/feedback", tags=["feedback"])
+logger = logging.getLogger(__name__)
 
 
 def _merge_meta(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
@@ -42,6 +44,38 @@ def _enrich_feedback_target(
     body: "FeedbackCreateBody",
 ) -> tuple[dict[str, Any], Optional[str], Optional[str]]:
     meta = dict(body.meta or {})
+
+    if body.target_type == "rag_answer":
+        try:
+            rag_run = repo.get_rag_run_for_user(user_id, body.target_id)
+        except Exception as e:
+            logger.warning("get_rag_run_for_user failed (continuing without enrich): %s", e)
+            rag_run = None
+        if rag_run:
+            meta = _merge_meta(
+                meta,
+                {
+                    "run_id": rag_run.get("id"),
+                    "query_snapshot": rag_run.get("query"),
+                    "top_k": rag_run.get("top_k"),
+                    "status": rag_run.get("status"),
+                    "latency_ms": rag_run.get("latency_ms"),
+                    "error_message": rag_run.get("error_message"),
+                    "created_at": rag_run.get("created_at"),
+                    "completed_at": rag_run.get("completed_at"),
+                },
+            )
+        else:
+            # Keep feedback ingestion resilient even when rag_runs logging is unavailable
+            # (e.g. missing optional table or run log insertion failure).
+            meta = _merge_meta(
+                meta,
+                {
+                    "run_id": body.target_id,
+                    "rag_run_lookup": "not_found",
+                },
+            )
+        return meta, None, None
 
     if body.target_type == "recommendation":
         target = repo.get_recommendation_by_id(body.target_id, user_id)
@@ -107,8 +141,9 @@ class FeedbackCreateBody(BaseModel):
     @field_validator("target_id")
     @classmethod
     def validate_target_id(cls, value: str) -> str:
-        uuid.UUID(value)
-        return value
+        s = (value or "").strip()
+        uuid.UUID(s)
+        return s
 
     @field_validator("action")
     @classmethod
@@ -135,13 +170,22 @@ class FeedbackCreateBody(BaseModel):
             uuid.UUID(value)
         return value
 
+    @field_validator("week_start")
+    @classmethod
+    def normalize_week_start(cls, value: Optional[str]) -> Optional[str]:
+        """Avoid empty string reaching SQL ::date (invalid)."""
+        if value is None:
+            return None
+        s = value.strip()
+        return s if s else None
+
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_feedback(
     user_id: Annotated[str, Depends(get_user_id)],
     body: FeedbackCreateBody,
 ):
-    """Create a feedback event for summary or recommendation."""
+    """Create a feedback event for summary, recommendation, or RAG answer."""
     repo = SupabaseRepo()
     enriched_meta, derived_source_id, derived_week_start = _enrich_feedback_target(repo, user_id, body)
     try:

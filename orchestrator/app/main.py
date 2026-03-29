@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI
 from app.config import load_env
 from app.db.pool import close_pool, init_pool
 from app.routers import documents, graph_test, ingest, ingest_status, notes, rag, recommendations, s2, s2_list, worker
-from app.routers import feedback, admin_feedback, admin_users, keywords, recommendation_debug
+from app.routers import feedback, admin_feedback, admin_users, admin_eval, keywords, recommendation_debug
 from app.utils.deps import get_user_id
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,7 @@ app.include_router(s2_list.router)
 app.include_router(recommendations.router)
 app.include_router(keywords.router)
 app.include_router(recommendation_debug.router)
+app.include_router(admin_eval.router)
 
 
 @app.get("/health")
@@ -72,8 +73,10 @@ async def trigger_worker(user_id: str = Depends(get_user_id)):
     """
     Trigger one worker tick (claim and process one queued job).
     Requires Bearer auth. For manual processing from the app.
+    Job is processed in background; returns immediately so the client doesn't time out.
     Returns { "status": "ok", "processed": true|false [, "job_id": "..." ] }.
     """
+    import asyncio
     from app.db.repo import SupabaseRepo
     from app.routers.worker import _cleanup_stale_jobs
     from app.worker.job_runner import process_job
@@ -82,8 +85,18 @@ async def trigger_worker(user_id: str = Depends(get_user_id)):
     cleaned = _cleanup_stale_jobs(repo, limit=1)
     job_id = repo.claim_one_queued_job_for_user(user_id)
     if job_id:
-        logger.info("trigger_worker: user=%s claimed job_id=%s", user_id, job_id)
-        await process_job(job_id)
+        logger.info("trigger_worker: user=%s claimed job_id=%s (background)", user_id, job_id)
+        asyncio.create_task(_run_job_background(job_id))
         return {"status": "ok", "processed": True, "job_id": job_id, "cleaned_stale_jobs": len(cleaned)}
     return {"status": "ok", "processed": False, "cleaned_stale_jobs": len(cleaned)}
+
+
+async def _run_job_background(job_id: str) -> None:
+    """Process a claimed job in background so the HTTP response returns immediately."""
+    from app.worker.job_runner import process_job
+    try:
+        await process_job(job_id)
+        logger.info("background job completed: job_id=%s", job_id)
+    except Exception:
+        logger.exception("background job failed: job_id=%s", job_id)
 

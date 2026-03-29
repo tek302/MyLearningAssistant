@@ -26,7 +26,7 @@ def _list_s2_for_user(user_id: str, week_start: str | None, limit: int) -> List[
                     FROM summaries
                     WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
                     AND extra->>'week_start' = %s
-                    ORDER BY created_at DESC
+                    ORDER BY (extra->>'week_start') DESC NULLS LAST, created_at DESC
                     LIMIT %s
                     """,
                     (user_uuid, week_start, limit),
@@ -37,7 +37,7 @@ def _list_s2_for_user(user_id: str, week_start: str | None, limit: int) -> List[
                     SELECT id, tldr, bullets, extra, created_at
                     FROM summaries
                     WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
-                    ORDER BY created_at DESC
+                    ORDER BY (extra->>'week_start') DESC NULLS LAST, created_at DESC
                     LIMIT %s
                     """,
                     (user_uuid, limit),

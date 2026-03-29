@@ -14,9 +14,12 @@ object FeedbackRepository {
 
     const val TARGET_RECOMMENDATION = "recommendation"
     const val TARGET_SUMMARY_S2 = "summary_s2"
+    const val TARGET_RAG_ANSWER = "rag_answer"
 
     const val ACTION_THUMBS_UP = "thumbs_up"
     const val ACTION_THUMBS_DOWN = "thumbs_down"
+    const val ACTION_PROCESS = "process"
+    const val ACTION_REMOVE = "remove"
 
     val RECOMMENDATION_REASONS = listOf(
         "want_more_like_this",
@@ -31,6 +34,24 @@ object FeedbackRepository {
         "too_long",
         "wrong_focus",
     )
+
+    val RAG_POSITIVE_REASONS = listOf(
+        "good_answer"
+    )
+
+    val RAG_NEGATIVE_REASONS = listOf(
+        "not_relevant",
+        "hallucination_suspected",
+        "too_shallow",
+    )
+
+    fun ragReasonsForAction(action: String?): List<String> {
+        return when (action) {
+            ACTION_THUMBS_UP -> RAG_POSITIVE_REASONS
+            ACTION_THUMBS_DOWN -> RAG_NEGATIVE_REASONS
+            else -> emptyList()
+        }
+    }
 
     sealed class Result {
         data class Success(val id: String) : Result()

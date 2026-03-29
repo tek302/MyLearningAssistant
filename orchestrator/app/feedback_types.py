@@ -6,6 +6,7 @@ FEEDBACK_TARGET_TYPES = (
     "summary_s1",
     "summary_s2",
     "recommendation",
+    "rag_answer",
 )
 
 FEEDBACK_ACTIONS = (
@@ -14,6 +15,8 @@ FEEDBACK_ACTIONS = (
     "save",
     "dismiss",
     "open",
+    "process",
+    "remove",
 )
 
 SUMMARY_FEEDBACK_REASONS = (
@@ -37,10 +40,17 @@ RECOMMENDATION_FEEDBACK_REASONS = (
     "duplicate_interest",
 )
 
-FEEDBACK_REASONS = SUMMARY_FEEDBACK_REASONS + tuple(
-    reason for reason in RECOMMENDATION_FEEDBACK_REASONS if reason not in SUMMARY_FEEDBACK_REASONS
+RAG_FEEDBACK_REASONS = (
+    "not_relevant",
+    "hallucination_suspected",
+    "too_shallow",
+    "good_answer",
 )
 
-POSITIVE_FEEDBACK_ACTIONS = ("thumbs_up", "save", "open")
-NEGATIVE_FEEDBACK_ACTIONS = ("thumbs_down", "dismiss")
+FEEDBACK_REASONS = SUMMARY_FEEDBACK_REASONS + tuple(
+    reason for reason in RECOMMENDATION_FEEDBACK_REASONS if reason not in SUMMARY_FEEDBACK_REASONS
+) + tuple(reason for reason in RAG_FEEDBACK_REASONS if reason not in SUMMARY_FEEDBACK_REASONS and reason not in RECOMMENDATION_FEEDBACK_REASONS)
+
+POSITIVE_FEEDBACK_ACTIONS = ("thumbs_up", "save", "open", "process")
+NEGATIVE_FEEDBACK_ACTIONS = ("thumbs_down", "dismiss", "remove")
 

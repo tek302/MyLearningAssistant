@@ -189,6 +189,7 @@ async def answer_query(
                         "requested_top_k": initial_state.get("user_requested_top_k", initial_state.get("top_k", 8)),
                         "latency_ms": 0,
                         "model": "",
+                        "run_id": initial_state.get("run_id") or str(uuid.uuid4()),
                         "attempts_used": 1,
                         "fallback_used": True,
                         "cannot_answer": True,
@@ -199,6 +200,7 @@ async def answer_query(
                 # Extract cannot_answer and enforce citations policy as final safety net
                 cannot_answer = bool(final_state.get("cannot_answer", False))
                 citations = [] if (cannot_answer or not request.include_citations) else final_state["citations"]
+                run_id = final_state.get("run_id") or str(uuid.uuid4())
                 
                 # Build meta
                 meta = {
@@ -207,6 +209,7 @@ async def answer_query(
                     "requested_top_k": final_state["user_requested_top_k"],
                     "latency_ms": final_state["latency_ms"],
                     "model": final_state.get("model", ""),
+                    "run_id": run_id,
                     "attempts_used": final_state.get("attempt", 1),
                     "fallback_used": bool(final_state.get("fallback_used", False)),
                     "cannot_answer": cannot_answer
@@ -241,6 +244,7 @@ async def answer_query(
             result["meta"]["requested_top_k"] = request.top_k
             result["meta"]["attempts_used"] = result["meta"].get("attempts_used", 1)
             result["meta"]["fallback_used"] = bool(result["meta"].get("fallback_used", False))
+            result["meta"]["run_id"] = result["meta"].get("run_id") or str(uuid.uuid4())
             
             # Infer cannot_answer from answer text if not provided by service
             answer = result.get("answer", "")

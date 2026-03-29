@@ -71,7 +71,7 @@ def rewrite_query(state: "RAGState") -> "RAGState":
     """
     # Import here to avoid circular dependency
     from ...graphs.rag_graph import _get_repo, _get_openai_client, _log_event
-    from ...utils.summarization import get_summary_model
+    from ...utils.llm_client import get_model
     
     # Only run when refine_strategy is "rewrite_query"
     refine_strategy = state.get("refine_strategy")
@@ -93,7 +93,7 @@ def rewrite_query(state: "RAGState") -> "RAGState":
     
     try:
         client = _get_openai_client()
-        model = get_summary_model()  # Use same model as synthesis
+        model = get_model("rag_rewrite")
         
         # Build rewrite prompt
         prompt = f"""Rewrite the following search query to improve retrieval of relevant information, while preserving the user's original intent.

@@ -71,6 +71,27 @@ fun RecommendationsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
+    suspend fun trackRecommendationAction(
+        recommendation: Recommendation,
+        action: String
+    ) {
+        FeedbackRepository.submit(
+            targetType = FeedbackRepository.TARGET_RECOMMENDATION,
+            targetId = recommendation.id,
+            action = action,
+            reasons = emptyList(),
+            comment = null,
+            weekStart = recommendation.weekStart,
+            meta = mapOf(
+                "title" to recommendation.title,
+                "url" to recommendation.url,
+                "source" to recommendation.source,
+                "topic_name" to recommendation.topicName,
+                "week_start" to recommendation.weekStart,
+            )
+        )
+    }
+
     val filterChipsKeywords = remember(keywordItems) {
         keywordItems
             .filter { it.status == "active" || it.status == "declining" }
@@ -366,6 +387,7 @@ fun RecommendationsScreen(
                                         if (processInProgress == rec.id) return@RecommendationCard
                                         processInProgress = rec.id
                                         scope.launch {
+                                            trackRecommendationAction(rec, FeedbackRepository.ACTION_PROCESS)
                                             when (val ingest = IngestRepository.ingestUrl(rec.url, rec.title)) {
                                                 is IngestRepository.Result.Success -> {
                                                     val deleted = RecommendationsRepository.delete(rec.id)
@@ -387,6 +409,7 @@ fun RecommendationsScreen(
                                         if (removeInProgress == rec.id) return@RecommendationCard
                                         removeInProgress = rec.id
                                         scope.launch {
+                                            trackRecommendationAction(rec, FeedbackRepository.ACTION_REMOVE)
                                             val deleted = RecommendationsRepository.delete(rec.id)
                                             if (deleted) {
                                                 recommendations = recommendations - rec

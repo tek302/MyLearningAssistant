@@ -22,7 +22,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.rememberNavController
 import com.example.learning.agent.data.repository.IngestRepository
+import com.example.learning.agent.data.repository.OnboardingPrefs
 import com.example.learning.agent.data.repository.RefreshAndHighlightPrefs
+import com.example.learning.agent.ui.components.OnboardingDialog
 import com.example.learning.agent.ui.auth.AuthViewModel
 import com.example.learning.agent.ui.navigation.*
 import com.example.learning.agent.ui.screens.signin.SignInScreen
@@ -160,11 +162,32 @@ fun MainScreen(
     val currentRoute = getCurrentRoute(navController)
     var selectedDocumentId by remember { mutableStateOf<String?>(null) }
     var selectedDocumentTitle by remember { mutableStateOf<String?>(null) }
+    fun ingestFailureSecondaryLine(failCode: String?, errorCode: String?): String = when (failCode?.trim()?.uppercase()) {
+        "PDF_TOO_LARGE" -> "Try a smaller file (under the app limit) or split the document."
+        "PDF_TOO_LONG" -> "Try fewer pages per upload or split the PDF."
+        "PDF_NO_TEXT", "PDF_PARSE_ERROR" -> "Try another PDF with selectable text, or a different export."
+        "PDF_PROCESS_ERROR" -> "If this keeps happening, try downloading the PDF and uploading it here."
+        "FETCH_TIMEOUT" -> "The download timed out. Retry or upload the file from your device."
+        "STORAGE_FETCH_FAILED", "MISSING_STORAGE_PATH" -> "Upload may not have completed. Try uploading the PDF again."
+        "URL_INGEST_ERROR", null -> when (errorCode) {
+            "fetch_403" -> "This site may block automated access. Try a PDF or another link."
+            "fetch_404" -> "Check the URL or try uploading a PDF."
+            "timeout" -> "Try again later or upload a PDF."
+            else -> "You can try uploading as PDF instead."
+        }
+        else -> "You can try another link or upload a PDF."
+    }
+
     // Ingest failure queue and dialog at MainScreen so the popup is always visible (any tab, any recomposition).
     var ingestFailureQueue by remember { mutableStateOf<List<IngestFailureInfo>>(emptyList()) }
     var refreshFeedTrigger by remember { mutableStateOf(0) }
+    var showOnboarding by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current.applicationContext
+
+    LaunchedEffect(Unit) {
+        showOnboarding = OnboardingPrefs.shouldShowOnboarding(context)
+    }
 
     // Determine if bottom nav should be shown (hide on detail screens)
     val showBottomNav = currentRoute in bottomNavItems.map { it.route }
@@ -181,6 +204,14 @@ fun MainScreen(
                     }
                 },
                 actions = {
+                    TextButton(
+                        onClick = {
+                            OnboardingPrefs.resetOnboardingSync(context)
+                            showOnboarding = true
+                        }
+                    ) {
+                        Text("Onboarding")
+                    }
                     TextButton(onClick = onSignOut) { Text("Sign out") }
                 }
             )
@@ -278,7 +309,7 @@ fun MainScreen(
                     Text(info.message)
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        "You can try uploading as PDF instead.",
+                        ingestFailureSecondaryLine(info.failCode, info.errorCode),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -307,6 +338,26 @@ fun MainScreen(
                 }) {
                     Text("OK")
                 }
+            }
+        )
+    }
+
+    if (showOnboarding) {
+        OnboardingDialog(
+            onStart = {
+                OnboardingPrefs.markOnboardingCompletedSync(context)
+                showOnboarding = false
+                navController.navigate(Destination.Feed.route) {
+                    popUpTo(navController.graph.startDestinationId) {
+                        saveState = true
+                    }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            },
+            onSkip = {
+                OnboardingPrefs.markOnboardingCompletedSync(context)
+                showOnboarding = false
             }
         )
     }

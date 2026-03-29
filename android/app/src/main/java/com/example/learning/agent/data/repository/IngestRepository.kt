@@ -32,7 +32,9 @@ object IngestRepository {
         val progress: Int,
         val sourceId: String?,
         val error: String?,
-        val errorCode: String?
+        val errorCode: String?,
+        /** Same as backend `sources.fail_code` when present. */
+        val failCode: String? = null
     )
 
     sealed class StatusResponse {
@@ -158,7 +160,8 @@ object IngestRepository {
                             progress = body.progress ?: 0,
                             sourceId = body.sourceId,
                             error = body.error,
-                            errorCode = body.errorCode
+                            errorCode = body.errorCode,
+                            failCode = body.failCode
                         )
                     )
                 } else {

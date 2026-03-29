@@ -22,7 +22,19 @@ interface RagApi {
     data class RagAnswerResponse(
         val answer: String,
         val citations: List<CitationItem>,
-        val meta: Map<String, Any>?
+        val meta: RagMeta?
+    )
+
+    data class RagMeta(
+        val impl: String? = null,
+        val top_k: Int? = null,
+        val requested_top_k: Int? = null,
+        val latency_ms: Int? = null,
+        val model: String? = null,
+        val run_id: String? = null,
+        val attempts_used: Int? = null,
+        val fallback_used: Boolean? = null,
+        val cannot_answer: Boolean? = null
     )
 
     data class CitationItem(

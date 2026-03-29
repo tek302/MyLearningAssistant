@@ -868,8 +868,9 @@ class SupabaseRepo:
         self,
         user_id: str,
         job_type: Optional[str] = None,
+        exclude_states: Optional[List[str]] = None,
     ) -> Optional[datetime]:
-        """Return latest job created_at for a user, optionally filtered by type."""
+        """Return latest job created_at for a user, optionally filtered by type and excluding certain states."""
         user_uuid = self._get_or_create_user_id(user_id)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
@@ -878,6 +879,10 @@ class SupabaseRepo:
                 if job_type:
                     q += " AND job_type = %s"
                     params.append(job_type)
+                if exclude_states:
+                    placeholders = ", ".join(["%s"] * len(exclude_states))
+                    q += f" AND state NOT IN ({placeholders})"
+                    params.extend(exclude_states)
                 q += " ORDER BY created_at DESC LIMIT 1"
                 cur.execute(q, params)
                 row = cur.fetchone()
@@ -1464,16 +1469,12 @@ class SupabaseRepo:
         cleaned_comment = (comment or "").strip() or None
         cleaned_meta = meta or None
         cleaned_client_event_id = (client_event_id or "").strip() or None
+        ws = (week_start or "").strip() if week_start else None
+        cleaned_week_start = ws if ws else None
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                if cleaned_client_event_id:
-                    cur.execute(
-                        "SELECT id FROM feedback_events WHERE client_event_id = %s AND user_id = %s",
-                        (cleaned_client_event_id, user_uuid),
-                    )
-                    existing = cur.fetchone()
-                    if existing:
-                        return str(existing[0])
+                # ON CONFLICT: uq_feedback_events_client_event_id is partial (WHERE client_event_id IS NOT NULL).
+                # Avoids race between SELECT-dedupe and INSERT that could raise UniqueViolation.
                 cur.execute(
                     """
                     INSERT INTO feedback_events (
@@ -1481,6 +1482,8 @@ class SupabaseRepo:
                         source_id, week_start, meta, client_event_id, created_at
                     )
                     VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s::date, %s::jsonb, %s, now())
+                    ON CONFLICT (client_event_id) WHERE client_event_id IS NOT NULL
+                    DO NOTHING
                     RETURNING id
                     """,
                     (
@@ -1491,14 +1494,26 @@ class SupabaseRepo:
                         psycopg.types.json.Json(cleaned_reasons) if cleaned_reasons else None,
                         cleaned_comment,
                         source_uuid,
-                        week_start,
+                        cleaned_week_start,
                         psycopg.types.json.Json(cleaned_meta) if cleaned_meta is not None else None,
                         cleaned_client_event_id,
                     ),
                 )
                 row = cur.fetchone()
-                conn.commit()
-                return str(row[0])
+                if row is not None:
+                    conn.commit()
+                    return str(row[0])
+                if cleaned_client_event_id:
+                    cur.execute(
+                        "SELECT id FROM feedback_events WHERE client_event_id = %s AND user_id = %s",
+                        (cleaned_client_event_id, user_uuid),
+                    )
+                    existing = cur.fetchone()
+                    conn.commit()
+                    if existing:
+                        return str(existing[0])
+                conn.rollback()
+                raise RuntimeError("feedback insert returned no id (unexpected)")
 
     def list_feedback_events(
         self,
@@ -1551,6 +1566,38 @@ class SupabaseRepo:
                         d["meta"] = {}
                     out.append(d)
                 return out
+
+    def get_rag_run_for_user(self, user_id: str, run_id: str) -> Optional[Dict[str, Any]]:
+        """Return a rag_runs row for the user if run_id exists."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        try:
+            run_uuid = uuid.UUID(run_id)
+        except ValueError:
+            return None
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, query, top_k, topic, lang, status, latency_ms, error_message, created_at, completed_at
+                    FROM rag_runs
+                    WHERE id = %s AND user_id = %s
+                    LIMIT 1
+                    """,
+                    (str(run_uuid), user_uuid),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                result = dict(zip(cols, row))
+                for col in ("id", "user_id"):
+                    if result.get(col) is not None:
+                        result[col] = str(result[col])
+                for col in ("created_at", "completed_at"):
+                    if result.get(col) is not None and hasattr(result[col], "isoformat"):
+                        result[col] = result[col].isoformat()
+                return result
 
     def get_feedback_summary(self, days: int = 30, limit_reasons: int = 10) -> Dict[str, Any]:
         """Return aggregate feedback summary for admin dashboards."""
@@ -1686,25 +1733,35 @@ class SupabaseRepo:
                     out.append(d)
                 return out
 
-    def get_feedback_reason_breakdown(self, days: int = 30, limit: int = 10) -> List[Dict[str, Any]]:
+    def get_feedback_reason_breakdown(
+        self,
+        days: int = 30,
+        limit: int = 10,
+        target_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """Return top feedback reasons in the time window."""
         since_ts = datetime.now(timezone.utc) - timedelta(days=max(1, days))
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
+                query = """
                     SELECT reason, COUNT(*)
                     FROM (
                         SELECT jsonb_array_elements_text(reasons) AS reason
                         FROM feedback_events
                         WHERE created_at >= %s AND reasons IS NOT NULL
+                """
+                params: List[Any] = [since_ts]
+                if target_type:
+                    query += " AND target_type = %s"
+                    params.append(target_type)
+                query += """
                     ) r
                     GROUP BY reason
                     ORDER BY COUNT(*) DESC, reason ASC
                     LIMIT %s
-                    """,
-                    (since_ts, limit),
-                )
+                    """
+                params.append(limit)
+                cur.execute(query, params)
                 return [{"reason": str(row[0]), "count": int(row[1])} for row in cur.fetchall()]
 
     def get_feedback_target_type_breakdown(self, days: int = 30) -> List[Dict[str, Any]]:
@@ -1795,18 +1852,257 @@ class SupabaseRepo:
                     out.append(d)
                 return out
 
+    def _table_exists(self, conn, table_name: str) -> bool:
+        """Return True when the table exists in public schema."""
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = %s
+                )
+                """,
+                (table_name,),
+            )
+            row = cur.fetchone()
+            return bool(row and row[0])
+
+    def get_alpha_kpi_snapshot(self, days: int = 7) -> Dict[str, Any]:
+        """
+        Return compact alpha KPI snapshot for dashboard use.
+
+        KPI definitions are proxy metrics for operational monitoring.
+        """
+        window_days = max(1, int(days))
+        since_ts = datetime.now(timezone.utc) - timedelta(days=window_days)
+        since_retention_ts = since_ts - timedelta(days=8)
+
+        with self._get_connection() as conn:
+            rag_runs_exists = self._table_exists(conn, "rag_runs")
+            rag_events_exists = self._table_exists(conn, "rag_events")
+
+            with conn.cursor() as cur:
+                # 1) Activation proxy: new users who ingested within 24h of signup.
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS new_users,
+                        COUNT(*) FILTER (WHERE s_first.user_id IS NOT NULL) AS activated_new_users
+                    FROM users u
+                    LEFT JOIN LATERAL (
+                        SELECT s.user_id
+                        FROM sources s
+                        WHERE s.user_id = u.id
+                          AND s.created_at >= u.created_at
+                          AND s.created_at < (u.created_at + INTERVAL '1 day')
+                        LIMIT 1
+                    ) s_first ON TRUE
+                    WHERE u.created_at >= %s
+                    """,
+                    (since_ts,),
+                )
+                activation_row = cur.fetchone() or (0, 0)
+                new_users = int(activation_row[0] or 0)
+                activated_new_users = int(activation_row[1] or 0)
+                activation_rate = round((activated_new_users / new_users), 4) if new_users else 0.0
+
+                # 2) D1 / D7 retention proxy from first observed activity day.
+                activity_union = """
+                    SELECT user_id, DATE(created_at) AS day FROM sources WHERE created_at >= %s
+                    UNION
+                    SELECT user_id, DATE(created_at) AS day FROM jobs WHERE created_at >= %s
+                    UNION
+                    SELECT user_id, DATE(created_at) AS day FROM feedback_events WHERE created_at >= %s
+                    UNION
+                    SELECT user_id, DATE(created_at) AS day FROM recommendation_generation_runs WHERE created_at >= %s
+                """
+                activity_params: List[Any] = [since_retention_ts, since_retention_ts, since_retention_ts, since_retention_ts]
+                if rag_runs_exists:
+                    activity_union += """
+                    UNION
+                    SELECT user_id, DATE(created_at) AS day FROM rag_runs WHERE created_at >= %s
+                    """
+                    activity_params.append(since_retention_ts)
+
+                retention_query = f"""
+                    WITH activity_days AS (
+                        {activity_union}
+                    ),
+                    first_day AS (
+                        SELECT user_id, MIN(day) AS day0
+                        FROM activity_days
+                        GROUP BY user_id
+                    ),
+                    d1_base AS (
+                        SELECT user_id, day0
+                        FROM first_day
+                        WHERE day0 <= (CURRENT_DATE - 2)
+                    ),
+                    d7_base AS (
+                        SELECT user_id, day0
+                        FROM first_day
+                        WHERE day0 <= (CURRENT_DATE - 8)
+                    ),
+                    d1_retained AS (
+                        SELECT COUNT(*) AS cnt
+                        FROM d1_base b
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM activity_days a
+                            WHERE a.user_id = b.user_id
+                              AND a.day >= (b.day0 + 1)
+                              AND a.day < (b.day0 + 2)
+                        )
+                    ),
+                    d7_retained AS (
+                        SELECT COUNT(*) AS cnt
+                        FROM d7_base b
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM activity_days a
+                            WHERE a.user_id = b.user_id
+                              AND a.day >= (b.day0 + 7)
+                              AND a.day < (b.day0 + 8)
+                        )
+                    )
+                    SELECT
+                        (SELECT COUNT(*) FROM d1_base) AS d1_base_count,
+                        (SELECT cnt FROM d1_retained) AS d1_retained_count,
+                        (SELECT COUNT(*) FROM d7_base) AS d7_base_count,
+                        (SELECT cnt FROM d7_retained) AS d7_retained_count
+                """
+                cur.execute(retention_query, activity_params)
+                d1_base, d1_retained, d7_base, d7_retained = cur.fetchone() or (0, 0, 0, 0)
+                d1_base = int(d1_base or 0)
+                d1_retained = int(d1_retained or 0)
+                d7_base = int(d7_base or 0)
+                d7_retained = int(d7_retained or 0)
+                d1_rate = round((d1_retained / d1_base), 4) if d1_base else 0.0
+                d7_rate = round((d7_retained / d7_base), 4) if d7_base else 0.0
+
+                # 3) failed jobs in last 24h.
+                cur.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM jobs
+                    WHERE created_at >= (NOW() - INTERVAL '24 hours')
+                      AND state = 'failed'
+                    """
+                )
+                failed_jobs_24h = int((cur.fetchone() or [0])[0] or 0)
+
+                # 4) cannot_answer rate (eval event based).
+                cannot_answer_count = 0
+                cannot_answer_base = 0
+                cannot_answer_rate = None
+                if rag_events_exists:
+                    cur.execute(
+                        """
+                        SELECT
+                            COUNT(*) FILTER (WHERE LOWER(COALESCE(data->>'cannot_answer', 'false')) = 'true') AS cannot_answer_count,
+                            COUNT(*) AS total_eval_events
+                        FROM rag_events
+                        WHERE event_type = 'eval'
+                          AND created_at >= %s
+                        """,
+                        (since_ts,),
+                    )
+                    c_row = cur.fetchone() or (0, 0)
+                    cannot_answer_count = int(c_row[0] or 0)
+                    cannot_answer_base = int(c_row[1] or 0)
+                    cannot_answer_rate = round((cannot_answer_count / cannot_answer_base), 4) if cannot_answer_base else 0.0
+
+                # 5) feedback volume by target type in window.
+                cur.execute(
+                    """
+                    SELECT target_type, COUNT(*)
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                    GROUP BY target_type
+                    """,
+                    (since_ts,),
+                )
+                feedback_by_target = {str(row[0]): int(row[1]) for row in cur.fetchall()}
+
+                # 6) recommendation action ratio from exact action events.
+                cur.execute(
+                    """
+                    SELECT action, COUNT(*)
+                    FROM feedback_events
+                    WHERE created_at >= %s
+                      AND target_type = 'recommendation'
+                      AND action = ANY(%s)
+                    GROUP BY action
+                    """,
+                    (since_ts, ["thumbs_up", "process", "remove"]),
+                )
+                rec_action_counts = {str(row[0]): int(row[1]) for row in cur.fetchall()}
+                rec_accept = rec_action_counts.get("thumbs_up", 0)
+                rec_process = rec_action_counts.get("process", 0)
+                rec_remove = rec_action_counts.get("remove", 0)
+                rec_total = rec_accept + rec_process + rec_remove
+                recommendation_action_ratio = {
+                    "accept_count": rec_accept,
+                    "process_count": rec_process,
+                    "remove_count": rec_remove,
+                    "total": rec_total,
+                    "accept_rate": round((rec_accept / rec_total), 4) if rec_total else 0.0,
+                    "process_rate": round((rec_process / rec_total), 4) if rec_total else 0.0,
+                    "remove_rate": round((rec_remove / rec_total), 4) if rec_total else 0.0,
+                    "definition": "exact: accept=thumbs_up, process=process button, remove=remove button",
+                }
+
+                return {
+                    "window_days": window_days,
+                    "activation_proxy": {
+                        "new_users": new_users,
+                        "activated_new_users_24h": activated_new_users,
+                        "activation_rate": activation_rate,
+                    },
+                    "retention_proxy": {
+                        "d1_base_users": d1_base,
+                        "d1_retained_users": d1_retained,
+                        "d1_rate": d1_rate,
+                        "d7_base_users": d7_base,
+                        "d7_retained_users": d7_retained,
+                        "d7_rate": d7_rate,
+                    },
+                    "failed_jobs_24h": failed_jobs_24h,
+                    "cannot_answer": {
+                        "available": rag_events_exists,
+                        "count": cannot_answer_count,
+                        "base": cannot_answer_base,
+                        "rate": cannot_answer_rate,
+                    },
+                    "feedback_volume": {
+                        "rag_answer": feedback_by_target.get("rag_answer", 0),
+                        "summary_s2": feedback_by_target.get("summary_s2", 0),
+                        "recommendation": feedback_by_target.get("recommendation", 0),
+                    },
+                    "recommendation_action_ratio": recommendation_action_ratio,
+                }
+
     def get_feedback_dashboard_data(self, days: int = 30, limit: int = 20) -> Dict[str, Any]:
         """Return compact admin dashboard data for HTML and JSON endpoints."""
         summary = self.get_feedback_summary(days=days, limit_reasons=min(limit, 20))
         recent_negative = self.list_recent_negative_feedback_events(days=days, limit=limit)
+        rag_top_reasons = self.get_feedback_reason_breakdown(
+            days=days,
+            limit=min(limit, 20),
+            target_type="rag_answer",
+        )
         return {
             "window_days": days,
             "summary": summary,
             "target_breakdown": self.get_feedback_target_type_breakdown(days=days),
             "recent_negative": recent_negative,
             "top_reasons": self.get_feedback_reason_breakdown(days=days, limit=min(limit, 20)),
+            "rag_top_reasons": rag_top_reasons,
             "recommendation_rollup": self.get_recommendation_feedback_rollup(days=days, limit=limit),
             "s2_rollup": self.get_s2_feedback_rollup(days=days, limit=limit),
+            "alpha_kpis": self.get_alpha_kpi_snapshot(days=min(days, 30)),
         }
 
     # ─── User Keywords (2-Stage Pipeline) ───

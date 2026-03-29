@@ -3,11 +3,7 @@ import time
 from typing import List
 from dotenv import load_dotenv
 
-try:
-    from openai import OpenAI
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
+from app.utils.llm_client import get_embedding_client
 
 # Load environment variables
 load_dotenv()
@@ -21,27 +17,10 @@ def get_embedding_model() -> str:
 def create_embeddings(texts: List[str], max_retries: int = 2) -> List[List[float]]:
     """
     Create embeddings for a list of texts using OpenAI API.
-    
-    Args:
-        texts: List of text strings to embed
-        max_retries: Maximum number of retry attempts (default: 2)
-        
-    Returns:
-        List of embedding vectors (1536 dimensions for text-embedding-3-small)
-        
-    Raises:
-        ValueError: If OpenAI is not installed or API key is missing
-        RuntimeError: If embedding creation fails after retries
+    Always uses OpenAI regardless of LLM_PROVIDER (to avoid re-embedding DB).
     """
-    if not HAS_OPENAI:
-        raise ValueError("OpenAI package is not installed. Install with: pip install openai")
-    
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is not set")
-    
     model = get_embedding_model()
-    client = OpenAI(api_key=api_key)
+    client = get_embedding_client()
     
     # Retry logic
     last_error = None

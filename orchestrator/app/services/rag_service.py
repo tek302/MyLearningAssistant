@@ -9,13 +9,7 @@ from dotenv import load_dotenv
 
 from ..db.repo import SupabaseRepo
 from ..utils.embeddings import create_embeddings, get_embedding_model
-from ..utils.summarization import get_summary_model
-
-try:
-    from openai import OpenAI
-    HAS_OPENAI = True
-except ImportError:
-    HAS_OPENAI = False
+from ..utils.llm_client import get_chat_client, get_model
 
 # Load environment variables
 load_dotenv()
@@ -48,7 +42,7 @@ class RAGService:
         """Initialize RAG service with repository."""
         self.repo = repo or SupabaseRepo()
         self.embedding_model = get_embedding_model()
-        self.summary_model = get_summary_model()
+        self.summary_model = get_model("rag_synthesis")
     
     def _normalize_embedding(self, embedding) -> List[float]:
         """
@@ -167,7 +161,8 @@ class RAGService:
                     "meta": {
                         "top_k": user_requested_top_k,
                         "latency_ms": latency_ms,
-                        "model": self.summary_model
+                        "model": self.summary_model,
+                        "run_id": run_id
                     }
                 }
             
@@ -266,7 +261,8 @@ class RAGService:
                 "meta": {
                     "top_k": user_requested_top_k,  # Use original user-requested value
                     "latency_ms": latency_ms,
-                    "model": self.summary_model
+                    "model": self.summary_model,
+                    "run_id": run_id
                 }
             }
             
@@ -288,14 +284,7 @@ class RAGService:
         Returns:
             Dictionary with answer text
         """
-        if not HAS_OPENAI:
-            raise ValueError("OpenAI package is not installed. Install with: pip install openai")
-        
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is not set")
-        
-        client = OpenAI(api_key=api_key)
+        client = get_chat_client()
         
         # Build prompt with citation markers and hallucination prevention
         prompt = f"""You are a helpful assistant that answers questions based on the provided context.
