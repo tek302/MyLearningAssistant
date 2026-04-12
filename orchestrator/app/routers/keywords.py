@@ -9,6 +9,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, Field
 
+from ..constants.keywords import USER_KEYWORD_MAX_CHARS
 from ..db.repo import SupabaseRepo
 from ..utils.deps import get_user_id
 
@@ -17,7 +18,8 @@ router = APIRouter(prefix="/keywords", tags=["keywords"])
 
 
 class CreateKeywordBody(BaseModel):
-    keyword: str = Field(..., min_length=1, max_length=200)
+    """Raw keyword from client; strip + `USER_KEYWORD_MAX_CHARS` enforced in handler."""
+    keyword: str = Field(..., min_length=1, max_length=2000)
     parent_keyword_id: Optional[str] = None
 
 
@@ -52,12 +54,23 @@ async def create_keyword(
     user_id: Annotated[str, Depends(get_user_id)],
     body: CreateKeywordBody,
 ):
+    s = body.keyword.strip()
+    if not s:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Keyword cannot be empty")
+    if len(s) > USER_KEYWORD_MAX_CHARS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Keyword must be at most {USER_KEYWORD_MAX_CHARS} characters. "
+                "Use a short phrase; split long topics into multiple keywords."
+            ),
+        )
     repo = SupabaseRepo()
     try:
         kw_id = await asyncio.to_thread(
             repo.insert_user_keyword,
             user_id,
-            keyword=body.keyword,
+            keyword=s,
             source="user_explicit",
             parent_keyword_id=body.parent_keyword_id,
         )
@@ -66,7 +79,7 @@ async def create_keyword(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Keyword already exists")
         logger.exception("create_keyword failed: %s", e)
         raise HTTPException(status_code=500, detail="Failed to create keyword") from e
-    return {"id": kw_id, "keyword": body.keyword, "status": "active"}
+    return {"id": kw_id, "keyword": s, "status": "active"}
 
 
 @router.patch("/{keyword_id}")

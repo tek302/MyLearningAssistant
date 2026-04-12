@@ -101,6 +101,12 @@ Thumbs.db
 /*.code-workspace
 /gcloud_build_deploy_command.txt
 
+# Root markdown: ignore all *.md here except the two canonical READMEs
+# (README.v2.md, README.exec.md, docs drafts, etc. stay local unless force-added)
+/*.md
+!README.md
+!README.ko.md
+
 # Deploy scripts (contain project-specific config)
 scripts/
 

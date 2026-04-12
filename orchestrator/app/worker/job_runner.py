@@ -12,6 +12,10 @@ from app.services.storage import canonical_pdf_storage_path
 from app.chains.ingest_graph import ingest_graph, IngestState
 
 logger = logging.getLogger(__name__)
+
+# Keep job.payload readable in Supabase; match typical error column limits.
+_REC_ERROR_MAX_LEN = 2000
+
 EXPECTED_URL_INGEST_ERROR_MARKERS = (
     "403",
     "404",
@@ -58,16 +62,45 @@ async def process_job(job_id: str) -> None:
             if ok:
                 from app.services.arxiv_recommendations import run_arxiv_recommendations_for_week
                 try:
-                    count, rec_error = await asyncio.to_thread(
+                    count, rec_error, rec_debug = await asyncio.to_thread(
                         run_arxiv_recommendations_for_week, user_id, week_start_used, None
                     )
                     if count == 0 and rec_error:
-                        repo.update_job(job_id, state="done", progress=100, payload_merge={"recommendations_failed": True})
+                        err_text = str(rec_error)[:_REC_ERROR_MAX_LEN]
+                        merge: dict = {
+                            "recommendations_failed": True,
+                            "recommendation_error": err_text,
+                        }
+                        if isinstance(rec_debug, dict) and rec_debug.get("arxiv_search"):
+                            merge["arxiv_search"] = rec_debug["arxiv_search"]
+                        repo.update_job(
+                            job_id,
+                            state="done",
+                            progress=100,
+                            payload_merge=merge,
+                        )
                     else:
-                        repo.update_job(job_id, state="done", progress=100)
+                        merge_done: dict = {}
+                        if isinstance(rec_debug, dict) and rec_debug.get("arxiv_search"):
+                            ax = rec_debug["arxiv_search"]
+                            if ax.get("fallback_used"):
+                                merge_done["arxiv_search"] = ax
+                        if merge_done:
+                            repo.update_job(job_id, state="done", progress=100, payload_merge=merge_done)
+                        else:
+                            repo.update_job(job_id, state="done", progress=100)
                 except Exception as rec_ex:
                     logger.warning("job_id=%s recommendations failed (S2 succeeded): %s", job_id, rec_ex)
-                    repo.update_job(job_id, state="done", progress=100, payload_merge={"recommendations_failed": True})
+                    err_text = str(rec_ex)[:_REC_ERROR_MAX_LEN]
+                    repo.update_job(
+                        job_id,
+                        state="done",
+                        progress=100,
+                        payload_merge={
+                            "recommendations_failed": True,
+                            "recommendation_error": err_text,
+                        },
+                    )
 
                 # 2-Stage Pipeline chain: S2 → keyword_weight_recalc → stage1_keyword_expansion
                 await _run_keyword_pipeline_after_s2(repo, user_id, week_start_used)

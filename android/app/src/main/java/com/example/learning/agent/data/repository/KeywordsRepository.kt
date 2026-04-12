@@ -5,12 +5,31 @@ import com.example.learning.agent.data.remote.ApiClient
 import com.example.learning.agent.data.remote.KeywordsApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import java.io.IOException
 
 object KeywordsRepository {
 
     private const val TAG = "KeywordsRepo"
     private val api: KeywordsApi get() = ApiClient.keywordsApi
+
+    /** FastAPI: `{"detail":"..."}` (400) or `{"detail":[{"msg":"..."}]}` (422). */
+    private fun parseFastApiError(raw: String?): String {
+        if (raw.isNullOrBlank()) return "Request failed"
+        return try {
+            val obj = JSONObject(raw)
+            obj.optJSONArray("detail")?.let { arr ->
+                if (arr.length() > 0) {
+                    val o = arr.optJSONObject(0)
+                    val msg = o?.optString("msg")?.trim().orEmpty()
+                    if (msg.isNotEmpty()) return msg
+                }
+            }
+            obj.optString("detail", "").trim().takeIf { it.isNotEmpty() } ?: raw
+        } catch (_: Exception) {
+            raw
+        }
+    }
 
     sealed class Result<out T> {
         data class Success<T>(val data: T) : Result<T>()
@@ -42,8 +61,8 @@ object KeywordsRepository {
                 if (response.isSuccessful && response.body() != null) {
                     Result.Success(response.body()!!)
                 } else {
-                    val msg = response.errorBody()?.string() ?: "HTTP ${response.code()}"
-                    Result.Error(msg)
+                    val raw = response.errorBody()?.string() ?: "HTTP ${response.code()}"
+                    Result.Error(parseFastApiError(raw))
                 }
             } catch (e: IOException) {
                 Result.Error("Network error: ${e.message}")

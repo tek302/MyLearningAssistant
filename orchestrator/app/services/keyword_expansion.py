@@ -9,6 +9,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.constants.keywords import USER_KEYWORD_MAX_CHARS
 from app.db.repo import SupabaseRepo
 from app.utils.llm_client import get_chat_client, get_model
 
@@ -18,6 +19,17 @@ MAX_SUGGESTIONS_PER_WEEK = 3
 REJECT_COOLDOWN_DAYS = 30
 NOTES_DAYS = 30
 NOTES_LIMIT = 30
+
+
+def _normalize_suggested_keyword(kw: str) -> str:
+    """Keep suggested labels short for search/UI; LLM should already comply (stage1-v2)."""
+    s = (kw or "").strip()
+    if len(s) <= USER_KEYWORD_MAX_CHARS:
+        return s
+    cut = s[:USER_KEYWORD_MAX_CHARS]
+    if " " in cut:
+        return cut.rsplit(" ", 1)[0].strip() or cut.strip()
+    return cut.strip()
 
 
 def _build_stage1_prompt(
@@ -41,6 +53,8 @@ Each suggestion must be one of these types:
 - emerging: a topic gaining traction in the user's research area
 - cross_domain: a keyword connecting two different areas the user studies
 - deepening: a more specific sub-topic of an existing keyword (specify parent)
+
+**keyword format (required):** `keyword` must be a SHORT search-friendly label: at most ~6 words and 80 characters, no full sentences. Put explanations only in `reason`.
 
 Current keyword set:
 {kw_lines}
@@ -106,7 +120,7 @@ def run_keyword_expansion(
         week_start=week_start,
         stage="stage1",
         keyword_snapshot=keyword_snapshot,
-        meta={"prompt_version": "stage1-v1", "model": get_model("keyword_expansion")},
+        meta={"prompt_version": "stage1-v2", "model": get_model("keyword_expansion")},
     )
 
     try:
@@ -141,11 +155,12 @@ def run_keyword_expansion(
     rejected_lower = {r.lower() for r in rejected_recently}
     filtered = []
     for s in suggestions[:MAX_SUGGESTIONS_PER_WEEK]:
-        kw = (s.get("keyword") or "").strip()
+        kw = _normalize_suggested_keyword((s.get("keyword") or "").strip())
         if not kw:
             continue
         if kw.lower() in existing_kw_lower or kw.lower() in rejected_lower:
             continue
+        s = {**s, "keyword": kw}
         filtered.append(s)
 
     if not filtered:

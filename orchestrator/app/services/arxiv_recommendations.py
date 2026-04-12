@@ -11,7 +11,6 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote_plus
 
 import requests
 
@@ -47,7 +46,8 @@ POSITIVE_FEEDBACK_REASONS = {
 }
 NEGATIVE_PENALTY_WEIGHT = 0.15
 KEYWORD_MATCH_BONUS = 0.10
-RECOMMENDATION_PROMPT_VERSION = "rec-arxiv-v3-keyword"
+RECOMMENDATION_PROMPT_VERSION = "rec-arxiv-v4-or"
+DEFAULT_ARXIV_BROAD_QUERY = "all:machine+learning"
 
 
 def get_recommendation_generation_meta() -> dict[str, Any]:
@@ -61,30 +61,137 @@ def get_recommendation_generation_meta() -> dict[str, Any]:
     }
 
 
+def _arxiv_all_clause(phrase: str) -> Optional[str]:
+    """
+    One `all:` term for arXiv API boolean query. Multi-word phrases use double quotes.
+    """
+    p = (phrase or "").strip()
+    if not p:
+        return None
+    p = re.sub(r"\s+", " ", p)
+    p = p.replace('"', " ").strip()
+    if not p:
+        return None
+    if re.search(r"\s", p):
+        return f'all:"{p}"'
+    if re.match(r"^[a-zA-Z0-9_.-]+$", p):
+        return f"all:{p}"
+    return f'all:"{p}"'
+
+
+def _join_arxiv_or_clauses(clauses: List[str]) -> str:
+    cleaned = [c for c in clauses if c]
+    if not cleaned:
+        return DEFAULT_ARXIV_BROAD_QUERY
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return "(" + " OR ".join(cleaned) + ")"
+
+
 def _keywords_to_search_query(keywords: List[Dict[str, Any]], max_terms: int = 6) -> str:
-    """Build arXiv search_query from keyword set, weighted by keyword weight."""
+    """OR of up to max_terms keywords by weight (recall-friendly vs strict AND)."""
     if not keywords:
-        return "all:machine+learning"
+        return DEFAULT_ARXIV_BROAD_QUERY
     sorted_kws = sorted(keywords, key=lambda k: float(k.get("weight", 0)), reverse=True)
-    terms = []
+    clauses: List[str] = []
     for kw in sorted_kws[:max_terms]:
-        word = kw["keyword"].strip()
-        if word:
-            terms.append(quote_plus(word))
-    if not terms:
-        return "all:machine+learning"
-    return "all:" + "+".join(terms)
+        c = _arxiv_all_clause((kw.get("keyword") or "").strip())
+        if c:
+            clauses.append(c)
+    return _join_arxiv_or_clauses(clauses)
+
+
+def _single_top_keyword_query(keywords: List[Dict[str, Any]]) -> str:
+    """Single highest-weight keyword as one `all:` clause."""
+    if not keywords:
+        return DEFAULT_ARXIV_BROAD_QUERY
+    sorted_kws = sorted(keywords, key=lambda k: float(k.get("weight", 0)), reverse=True)
+    for kw in sorted_kws[:1]:
+        c = _arxiv_all_clause((kw.get("keyword") or "").strip())
+        if c:
+            return c
+    return DEFAULT_ARXIV_BROAD_QUERY
 
 
 def _s2_text_to_search_query(s2_text: str, max_terms: int = 5) -> str:
-    """Build arXiv search_query from S2 text. Fallback when no keywords."""
+    """OR of first max_terms alphanumeric words from prose (no strict AND)."""
     if not (s2_text and s2_text.strip()):
-        return "all:machine+learning"
+        return DEFAULT_ARXIV_BROAD_QUERY
     text = re.sub(r"\s+", " ", s2_text.strip()).strip()
     words = [w for w in text.split() if len(w) > 1 and w.isalnum()][:max_terms]
     if not words:
-        return "all:machine+learning"
-    return "all:" + "+".join(quote_plus(w) for w in words)
+        return DEFAULT_ARXIV_BROAD_QUERY
+    clauses: List[str] = []
+    for w in words:
+        c = _arxiv_all_clause(w)
+        if c:
+            clauses.append(c)
+    return _join_arxiv_or_clauses(clauses)
+
+
+def _resolve_arxiv_candidates(
+    has_keywords: bool,
+    active_keywords: List[Dict[str, Any]],
+    s2_text: str,
+    combined_text: str,
+) -> Tuple[List[Dict[str, Any]], str, str, List[Dict[str, Any]]]:
+    """
+    Tiered arXiv search: keyword OR → S2 OR → single keyword → broad default.
+    Returns (candidates, search_query_used, winning_tier, attempts_log).
+    Each attempts_log entry: {tier, query, candidates}.
+    """
+    attempts: List[Dict[str, Any]] = []
+
+    def _record_and_fetch(sq: str, tier: str) -> List[Dict[str, Any]]:
+        cand = _fetch_arxiv_search(sq)
+        attempts.append({"tier": tier, "query": sq, "candidates": len(cand)})
+        logger.info(
+            "arxiv_recommendations: search tier=%s candidates=%d query=%s",
+            tier, len(cand), sq[:500] + ("..." if len(sq) > 500 else ""),
+        )
+        return cand
+
+    if has_keywords:
+        sq = _keywords_to_search_query(active_keywords)
+        cand = _record_and_fetch(sq, "keywords_or")
+        if cand:
+            return cand, sq, "keywords_or", attempts
+        if s2_text.strip():
+            sq2 = _s2_text_to_search_query(s2_text)
+            cand = _record_and_fetch(sq2, "s2_or")
+            if cand:
+                return cand, sq2, "s2_or", attempts
+        sq3 = _single_top_keyword_query(active_keywords)
+        cand = _record_and_fetch(sq3, "single_keyword")
+        if cand:
+            return cand, sq3, "single_keyword", attempts
+        cand = _record_and_fetch(DEFAULT_ARXIV_BROAD_QUERY, "default_broad")
+        return cand, DEFAULT_ARXIV_BROAD_QUERY, "default_broad", attempts
+
+    sq0 = _s2_text_to_search_query(combined_text)
+    cand = _record_and_fetch(sq0, "s2_or_no_keywords")
+    if cand:
+        return cand, sq0, "s2_or_no_keywords", attempts
+    cand = _record_and_fetch(DEFAULT_ARXIV_BROAD_QUERY, "default_broad")
+    return cand, DEFAULT_ARXIV_BROAD_QUERY, "default_broad", attempts
+
+
+def _arxiv_search_meta(
+    winning_tier: str,
+    attempts: List[Dict[str, Any]],
+    has_keywords: bool,
+) -> Dict[str, Any]:
+    """Compact DB-friendly trace for recommendation_generation_runs.meta."""
+    primary = "keywords_or" if has_keywords else "s2_or_no_keywords"
+    fallback_used = bool(attempts) and winning_tier != primary
+    return {
+        "arxiv_search": {
+            "winning_tier": winning_tier,
+            "primary_tier": primary,
+            "fallback_used": fallback_used,
+            "attempts": attempts,
+        },
+    }
 
 
 def _compute_keyword_match_score(
@@ -210,22 +317,14 @@ def run_arxiv_recommendations_for_week(
     week_start: str,
     s2_text: Optional[str] = None,
     repo: Optional[SupabaseRepo] = None,
-) -> Tuple[int, Optional[str]]:
+) -> Tuple[int, Optional[str], Optional[Dict[str, Any]]]:
     """
     Stage 2: Generate Top 3 arXiv recommendations for the week.
     Primary input: user's active keyword set.
     Secondary: S2 text + notes + feedback (enrichment signals).
 
-    Pipeline:
-    1. Load active keywords → build search query from keywords
-    2. Fetch S2 + notes + feedback as enrichment context
-    3. Search arXiv with keyword-based query
-    4. Embed combined text (keywords + S2 + notes), rerank by cosine similarity
-    5. Add keyword match bonus for each candidate
-    6. Record recommendation_generation_run with full traceability
-    7. Insert Top 3 into recommendations
-
-    Returns (inserted_count, None) or (0, error_message).
+    Returns (inserted_count, error_or_none, arxiv_debug_or_none). Third value includes
+    ``arxiv_search`` (tier, attempts, fallback_used) when the arXiv search path ran.
     """
     repo = repo or SupabaseRepo()
     topic_name = "This Week"
@@ -240,7 +339,7 @@ def run_arxiv_recommendations_for_week(
         s2_row = repo.get_s2_for_user_week(user_id, week_start)
         if not s2_row:
             if not has_keywords:
-                return 0, "no S2 for week and no keywords"
+                return 0, "no S2 for week and no keywords", None
         else:
             parts = []
             if s2_row.get("tldr"):
@@ -285,26 +384,73 @@ def run_arxiv_recommendations_for_week(
     combined_parts = [part for part in (keyword_text, s2_text, interest_text, positive_feedback_text) if part and part.strip()]
     combined_text = "\n\n".join(combined_parts).strip()
     if not combined_text:
-        return 0, "no keywords, S2, or notes"
+        # Record a run row even when we have to exit early, for observability.
+        repo.insert_recommendation_generation_run(
+            user_id=user_id,
+            week_start=week_start,
+            stage="stage2",
+            keyword_snapshot=keyword_snapshot,
+            candidate_count=0,
+            selected_count=0,
+            query_text=None,
+            selected_urls=[],
+            score_breakdown={},
+            stage1_suggestion_ids=[],
+            meta={**get_recommendation_generation_meta(), "error_reason": "no keywords, S2, or notes"},
+        )
+        return 0, "no keywords, S2, or notes", None
 
-    # ── 6. Build search query (keywords primary, S2 fallback) ──
-    if has_keywords:
-        search_query = _keywords_to_search_query(active_keywords)
-    else:
-        search_query = _s2_text_to_search_query(combined_text)
-
-    candidates = _fetch_arxiv_search(search_query)
+    # ── 6. arXiv search (OR keywords → fallbacks); trace attempts in meta
+    candidates, search_query, search_tier, arxiv_attempts = _resolve_arxiv_candidates(
+        has_keywords, active_keywords, s2_text, combined_text
+    )
+    arxiv_trace = _arxiv_search_meta(search_tier, arxiv_attempts, has_keywords)
     if len(candidates) < TOP_N:
         logger.info("arxiv_recommendations: got %d candidates, need at least %d", len(candidates), TOP_N)
     if not candidates:
-        return 0, "no arXiv candidates"
+        repo.insert_recommendation_generation_run(
+            user_id=user_id,
+            week_start=week_start,
+            stage="stage2",
+            keyword_snapshot=keyword_snapshot,
+            candidate_count=0,
+            selected_count=0,
+            query_text=search_query,
+            selected_urls=[],
+            score_breakdown={},
+            stage1_suggestion_ids=[],
+            meta={
+                **get_recommendation_generation_meta(),
+                "error_reason": "no arXiv candidates",
+                **arxiv_trace,
+            },
+        )
+        return 0, "no arXiv candidates", arxiv_trace
 
     # ── 7. Embed combined text + candidates ──
     try:
         combined_embedding = create_embeddings([combined_text[:8000]])[0]
     except Exception as e:
         logger.warning("Combined embedding failed: %s", e)
-        return 0, f"embedding failed: {e}"
+        # Record embedding failure for observability.
+        repo.insert_recommendation_generation_run(
+            user_id=user_id,
+            week_start=week_start,
+            stage="stage2",
+            keyword_snapshot=keyword_snapshot,
+            candidate_count=len(candidates),
+            selected_count=0,
+            query_text=search_query,
+            selected_urls=[c["url"] for c in candidates],
+            score_breakdown={},
+            stage1_suggestion_ids=[],
+            meta={
+                **get_recommendation_generation_meta(),
+                "error_reason": f"embedding failed (combined): {e}",
+                **arxiv_trace,
+            },
+        )
+        return 0, f"embedding failed: {e}", arxiv_trace
 
     negative_embedding = None
     if negative_feedback_text:
@@ -318,7 +464,25 @@ def run_arxiv_recommendations_for_week(
         candidate_embeddings = create_embeddings(texts_to_embed)
     except Exception as e:
         logger.warning("Candidate embeddings failed: %s", e)
-        return 0, f"embedding failed: {e}"
+        # Record embedding failure for observability.
+        repo.insert_recommendation_generation_run(
+            user_id=user_id,
+            week_start=week_start,
+            stage="stage2",
+            keyword_snapshot=keyword_snapshot,
+            candidate_count=len(candidates),
+            selected_count=0,
+            query_text=search_query,
+            selected_urls=[c["url"] for c in candidates],
+            score_breakdown={},
+            stage1_suggestion_ids=[],
+            meta={
+                **get_recommendation_generation_meta(),
+                "error_reason": f"embedding failed (candidates): {e}",
+                **arxiv_trace,
+            },
+        )
+        return 0, f"embedding failed: {e}", arxiv_trace
 
     # ── 8. Score: embedding similarity + keyword match bonus - negative penalty ──
     scored = []
@@ -380,7 +544,7 @@ def run_arxiv_recommendations_for_week(
         selected_urls=selected_urls,
         score_breakdown=avg_breakdown,
         stage1_suggestion_ids=stage1_suggestion_ids,
-        meta=get_recommendation_generation_meta(),
+        meta={**get_recommendation_generation_meta(), **arxiv_trace},
     )
 
     # ── 10. Insert recommendations ──
@@ -401,10 +565,10 @@ def run_arxiv_recommendations_for_week(
             inserted += 1
         except Exception as e:
             logger.warning("insert_recommendation failed: %s", e)
-            return inserted, str(e)
+            return inserted, str(e), arxiv_trace
 
     logger.info(
         "arxiv_recommendations: user_id=%s week_start=%s inserted=%d keywords=%d run_id=%s",
         user_id, week_start, inserted, len(active_keywords), run_id,
     )
-    return inserted, None
+    return inserted, None, arxiv_trace
