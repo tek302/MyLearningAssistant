@@ -143,7 +143,7 @@ This system treats latency, token budget, and failure modes as first-class const
 - Optional judge/refine gating (`JUDGE_ENABLED`) to tune quality–cost tradeoffs by environment
 - Provider portability (OpenAI / Gemini for chat; stable embedding strategy to avoid re-embedding churn)
 
-See [`orchestrator/docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](orchestrator/docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md).
+See [`orchestrator/docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md).
 
 ---
 
@@ -160,7 +160,7 @@ Core research threads applied:
 - Personalized RAG: PersonaRAG, PrLM
 - Evaluation frameworks: AgentRecBench, LaMP, PersonaBench, CiteRAG
 
-Full bibliography and decision log: [`orchestrator/docs/MEMORY_EVOLUTION_DESIGN.md`](orchestrator/docs/MEMORY_EVOLUTION_DESIGN.md).
+Full bibliography and decision log: [`docs/MEMORY_EVOLUTION_DESIGN.md`](docs/MEMORY_EVOLUTION_DESIGN.md).
 
 ---
 
@@ -189,13 +189,13 @@ See [`docs/README.md`](docs/README.md) for Python, `.env`, `uvicorn`, and exampl
 
 | Document | Description |
 |----------|-------------|
-| [`PERSONALIZED_MEMORY_ARCHITECTURE_DRAFT.md`](orchestrator/docs/PERSONALIZED_MEMORY_ARCHITECTURE_DRAFT.md) | Target 6-layer architecture, current vs target, phased plan |
-| [`MEMORY_EVOLUTION_DESIGN.md`](orchestrator/docs/MEMORY_EVOLUTION_DESIGN.md) | Two-stage pipeline deep dive, design decisions, bibliography |
-| [`LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](orchestrator/docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md) | LLM call sites, prompts, cost, provider migration |
-| [`RESEARCH_KEYWORD_TREE_AND_ROADMAP.md`](orchestrator/docs/RESEARCH_KEYWORD_TREE_AND_ROADMAP.md) | Literature map + research roadmap |
-| [`EVALUATION_BENCHMARKS_AND_STRATEGY.md`](orchestrator/docs/EVALUATION_BENCHMARKS_AND_STRATEGY.md) | Benchmarks, LLM-as-judge, online metrics |
-| [`LAUNCH_STRATEGY_AND_REVENUE_MODEL.md`](orchestrator/docs/LAUNCH_STRATEGY_AND_REVENUE_MODEL.md) | Go-to-market and revenue framing |
-| [`MARKET_COMPARISON_PM_VC.md`](orchestrator/docs/MARKET_COMPARISON_PM_VC.md) | Product comparison vs adjacent tools |
+| [`PERSONALIZED_MEMORY_ARCHITECTURE_DRAFT.md`](docs/PERSONALIZED_MEMORY_ARCHITECTURE_DRAFT.md) | Target 6-layer architecture, current vs target, phased plan |
+| [`MEMORY_EVOLUTION_DESIGN.md`](docs/MEMORY_EVOLUTION_DESIGN.md) | Two-stage pipeline deep dive, design decisions, bibliography |
+| [`LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md) | LLM call sites, prompts, cost, provider migration |
+| [`RESEARCH_KEYWORD_TREE_AND_ROADMAP.md`](docs/RESEARCH_KEYWORD_TREE_AND_ROADMAP.md) | Literature map + research roadmap |
+| [`EVALUATION_BENCHMARKS_AND_STRATEGY.md`](docs/EVALUATION_BENCHMARKS_AND_STRATEGY.md) | Benchmarks, LLM-as-judge, online metrics |
+| [`LAUNCH_STRATEGY_AND_REVENUE_MODEL.md`](docs/LAUNCH_STRATEGY_AND_REVENUE_MODEL.md) | Go-to-market and revenue framing |
+| [`MARKET_COMPARISON_PM_VC.md`](docs/MARKET_COMPARISON_PM_VC.md) | Product comparison vs adjacent tools |
 
 ---
 
