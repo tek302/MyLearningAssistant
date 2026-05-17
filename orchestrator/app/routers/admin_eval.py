@@ -84,12 +84,13 @@ def _format_summary(s: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _load_s2_context(repo: SupabaseRepo, user_id: str, week_start: str) -> Dict[str, Any]:
+def _load_s2_context(repo: SupabaseRepo, user_id: str, week_start: str, thread_id: Optional[str] = None) -> Dict[str, Any]:
     from ..services.s2_consolidation import _resolve_bounds
     now_utc = datetime.now(timezone.utc)
     norm_key, start_ts, end_ts, _ = _resolve_bounds(week_start, now_utc)
 
-    sources = repo.get_sources_for_user_between(user_id, start_ts, end_ts)
+    tid = thread_id or repo.get_or_create_default_thread_id(user_id)
+    sources = repo.get_sources_for_user_between(user_id, start_ts, end_ts, thread_id=tid)
     source_ids = [str(s["id"]) for s in sources]
     s1_list = repo.get_s1_summaries_for_sources(source_ids) if source_ids else []
 
@@ -141,7 +142,7 @@ def _load_s2_context(repo: SupabaseRepo, user_id: str, week_start: str) -> Dict[
     prev_s2_text = ""
     try:
         prev_key = (datetime.fromisoformat(norm_key) - timedelta(days=7)).date().isoformat()
-        prev_s2 = repo.get_s2_for_user_week(user_id, prev_key)
+        prev_s2 = repo.get_s2_for_user_week(user_id, prev_key, thread_id=tid)
         if prev_s2:
             parts = []
             if prev_s2.get("tldr"):
@@ -182,6 +183,7 @@ class S2EvalResponse(BaseModel):
 async def eval_s2(
     user_id: str = Query(..., description="Firebase UID or internal user_id"),
     week_start: str = Query(..., description="Week start YYYY-MM-DD"),
+    thread_id: Optional[str] = Query(None, description="interest_threads id (default: General)"),
     x_admin_secret: Annotated[Optional[str], Header(alias="x-admin-secret")] = None,
     admin_secret: Optional[str] = Query(None, alias="secret"),
 ):
@@ -189,7 +191,7 @@ async def eval_s2(
     _check_admin_secret(x_admin_secret, admin_secret)
     repo = SupabaseRepo()
 
-    ctx = _load_s2_context(repo, user_id, week_start)
+    ctx = _load_s2_context(repo, user_id, week_start, thread_id=thread_id)
     if not ctx["s1_text"].strip():
         raise HTTPException(status_code=404, detail="No S1 text found for this user/week")
 

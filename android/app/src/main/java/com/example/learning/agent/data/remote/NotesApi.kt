@@ -1,5 +1,6 @@
 package com.example.learning.agent.data.remote
 
+import com.google.gson.annotations.SerializedName
 import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.DELETE
@@ -17,6 +18,7 @@ interface NotesApi {
     @GET("notes")
     suspend fun getNotes(
         @Query("source_id") sourceId: String? = null,
+        @Query("thread_id") threadId: String? = null,
         @Query("limit") limit: Int = 100,
         @Query("offset") offset: Int = 0
     ): Response<NotesResponse>
@@ -34,12 +36,14 @@ interface NotesApi {
         val source_id: String? = null,
         val topic: String? = null,
         val content: String,
+        @SerializedName("thread_id") val threadId: String? = null,
         val created_at: String? = null
     )
 
     data class CreateNoteRequest(
         val content: String,
         val source_id: String? = null,
-        val topic: String? = null
+        val topic: String? = null,
+        @SerializedName("thread_id") val threadId: String? = null
     )
 }

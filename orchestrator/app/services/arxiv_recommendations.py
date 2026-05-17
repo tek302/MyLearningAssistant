@@ -317,6 +317,7 @@ def run_arxiv_recommendations_for_week(
     week_start: str,
     s2_text: Optional[str] = None,
     repo: Optional[SupabaseRepo] = None,
+    thread_id: Optional[str] = None,
 ) -> Tuple[int, Optional[str], Optional[Dict[str, Any]]]:
     """
     Stage 2: Generate Top 3 arXiv recommendations for the week.
@@ -326,17 +327,26 @@ def run_arxiv_recommendations_for_week(
     Returns (inserted_count, error_or_none, arxiv_debug_or_none). Third value includes
     ``arxiv_search`` (tier, attempts, fallback_used) when the arXiv search path ran.
     """
+    from app.services.thread_effective_keywords import build_effective_keywords, parse_thread_weights
+
     repo = repo or SupabaseRepo()
-    topic_name = "This Week"
+    tid = thread_id or repo.get_or_create_default_thread_id(user_id)
+    thread_row = repo.get_interest_thread(tid, user_id) or {}
+    topic_name = ((thread_row.get("name") or "") or "This Week").strip() or "This Week"
 
     # ── 1. Load active keywords (primary input) ──
-    active_keywords = repo.list_user_keywords(user_id, status="active")
+    global_kw = repo.list_user_keywords(user_id, status="active")
+    try:
+        tw_rows = repo.list_thread_keyword_weights(tid, user_id)
+        active_keywords = build_effective_keywords(global_kw, parse_thread_weights(tw_rows))
+    except Exception:
+        active_keywords = global_kw
     keyword_snapshot = repo.get_active_keyword_snapshot(user_id)
     has_keywords = len(active_keywords) > 0
 
     # ── 2. Load S2 text (secondary signal) ──
     if s2_text is None:
-        s2_row = repo.get_s2_for_user_week(user_id, week_start)
+        s2_row = repo.get_s2_for_user_week(user_id, week_start, thread_id=tid)
         if not s2_row:
             if not has_keywords:
                 return 0, "no S2 for week and no keywords", None
@@ -355,8 +365,16 @@ def run_arxiv_recommendations_for_week(
     since_ts = datetime.now(timezone.utc) - timedelta(days=NOTES_DAYS_FOR_RECOMMENDATIONS)
     try:
         notes_list = repo.list_notes_for_user(
-            user_id, since_ts=since_ts, limit=NOTES_LIMIT_FOR_RECOMMENDATIONS, offset=0,
+            user_id,
+            since_ts=since_ts,
+            limit=NOTES_LIMIT_FOR_RECOMMENDATIONS,
+            offset=0,
+            thread_id=tid,
         )
+        if not notes_list:
+            notes_list = repo.list_notes_for_user(
+                user_id, since_ts=since_ts, limit=NOTES_LIMIT_FOR_RECOMMENDATIONS, offset=0,
+            )
     except Exception as e:
         logger.warning("list_notes_for_user failed (continuing without notes): %s", e)
         notes_list = []
@@ -396,7 +414,7 @@ def run_arxiv_recommendations_for_week(
             selected_urls=[],
             score_breakdown={},
             stage1_suggestion_ids=[],
-            meta={**get_recommendation_generation_meta(), "error_reason": "no keywords, S2, or notes"},
+            meta={**get_recommendation_generation_meta(), "error_reason": "no keywords, S2, or notes", "thread_id": tid},
         )
         return 0, "no keywords, S2, or notes", None
 
@@ -422,6 +440,7 @@ def run_arxiv_recommendations_for_week(
             meta={
                 **get_recommendation_generation_meta(),
                 "error_reason": "no arXiv candidates",
+                "thread_id": tid,
                 **arxiv_trace,
             },
         )
@@ -447,6 +466,7 @@ def run_arxiv_recommendations_for_week(
             meta={
                 **get_recommendation_generation_meta(),
                 "error_reason": f"embedding failed (combined): {e}",
+                "thread_id": tid,
                 **arxiv_trace,
             },
         )
@@ -479,6 +499,7 @@ def run_arxiv_recommendations_for_week(
             meta={
                 **get_recommendation_generation_meta(),
                 "error_reason": f"embedding failed (candidates): {e}",
+                "thread_id": tid,
                 **arxiv_trace,
             },
         )
@@ -530,7 +551,9 @@ def run_arxiv_recommendations_for_week(
         ],
     }
 
-    recent_suggestions = repo.list_keyword_suggestions(user_id, status="accepted", week_start=week_start, limit=10)
+    recent_suggestions = repo.list_keyword_suggestions(
+        user_id, status="accepted", week_start=week_start, thread_id=tid, limit=10,
+    )
     stage1_suggestion_ids = [s["id"] for s in recent_suggestions]
 
     run_id = repo.insert_recommendation_generation_run(
@@ -544,7 +567,7 @@ def run_arxiv_recommendations_for_week(
         selected_urls=selected_urls,
         score_breakdown=avg_breakdown,
         stage1_suggestion_ids=stage1_suggestion_ids,
-        meta={**get_recommendation_generation_meta(), **arxiv_trace},
+        meta={**get_recommendation_generation_meta(), "thread_id": tid, **arxiv_trace},
     )
 
     # ── 10. Insert recommendations ──
@@ -561,6 +584,7 @@ def run_arxiv_recommendations_for_week(
                 url=c["url"],
                 source="arXiv",
                 score=s["final_score"],
+                thread_id=tid,
             )
             inserted += 1
         except Exception as e:
@@ -568,7 +592,7 @@ def run_arxiv_recommendations_for_week(
             return inserted, str(e), arxiv_trace
 
     logger.info(
-        "arxiv_recommendations: user_id=%s week_start=%s inserted=%d keywords=%d run_id=%s",
-        user_id, week_start, inserted, len(active_keywords), run_id,
+        "arxiv_recommendations: user_id=%s week_start=%s thread=%s inserted=%d keywords=%d run_id=%s",
+        user_id, week_start, tid, inserted, len(active_keywords), run_id,
     )
     return inserted, None, arxiv_trace

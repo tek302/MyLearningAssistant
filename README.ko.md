@@ -134,6 +134,34 @@ flowchart TB
 
 ---
 
+## 기술 스택 (Tech Stack)
+
+> **클로즈드 알파 전제:** **메모리 → 통합 → RAG → 2단계 추천 → 피드백** 루프를 끝까지 검증한 뒤, 멀티 플랫폼·멀티 카탈로그 확장에 투자하기 위해 **의도적으로 제품 범위를 좁게** 잡았습니다.
+
+### 클로즈드 알파 — 범위와 자주 묻는 점
+
+- **플랫폼:** **Android만** (Kotlin / Jetpack Compose). **iOS 앱은 없고**, 이 저장소 기준 **공식 웹 클라이언트도 없습니다**. FastAPI 오케스트레이터는 이후 클라이언트를 붙이기 위한 백엔드 층으로 두었습니다.
+- **“왜 논문 추천은 arXiv 위주인가?”** **라이브러리 수집(Ingest)** 은 **여러 사이트의 URL/PDF**를 받을 수 있습니다. 반면 **주간 자동 논문 추천(2단계)** 은 후보 수집에 **arXiv Atom API** (`export.arxiv.org/api/query`) **만** 사용합니다—이 저장소에는 **Semantic Scholar 등 제3자 논문 API 연동이 없습니다**. Ingest 경로에서는 URL이 arXiv일 때 **제목 조회**용으로 arXiv API를 쓸 수 있습니다. Semantic Scholar·PubMed·RSS·뉴스레터 등은 **클로즈드 알파 이후** 로드맵입니다.
+- **기대치:** 소비자용 완성도·멀티테넌트 SaaS SLA를 주장하기보다, **아키텍처와 장기 피드백 지표 검증**에 가깝게 보시면 됩니다.
+
+| 층 | 기술 |
+|----|------|
+| **모바일 클라이언트** | Android (Kotlin), Jetpack Compose |
+| **API** | Python 3, FastAPI, Uvicorn |
+| **RAG 오케스트레이션** | LangGraph (상태ful: 검색 → 합성 → 평가 → 판정 → 정제) |
+| **데이터 플레인** | PostgreSQL + **pgvector** (코사인; SQL 마이그레이션에 따른 IVFFlat류 인덱스) |
+| **매니지드 서비스** | Supabase (Postgres + 선택적 Storage), Firebase Authentication |
+| **LLM·임베딩** | OpenAI 채팅 완성; 청크·쿼리용 `text-embedding-3-small` (1536차원); 채팅은 OpenAI 호환 엔드포인트로 Gemini 선택 가능 |
+| **논문 API** | **arXiv Atom API**만 (`export.arxiv.org`) — 2단계 검색 + 수집 시 arXiv URL 제목 조회; **Semantic Scholar 없음** |
+| **비동기 작업** | DB 기반 `jobs` + 워커 틱·백그라운드 처리 (수집, S2, 추천 단계) |
+| **배포** | Google Cloud Run (오케스트레이터의 일반적 배포 대상) |
+
+**수집·파싱 (orchestrator):** HTML은 BeautifulSoup; PDF는 PyMuPDF (페이지·용량 한도는 설정으로 제한).
+
+모델 티어·환경 변수·비용: [`docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md).
+
+---
+
 ## 추론 비용·효율 (하드웨어 아키텍트 관점)
 
 지연·토큰 예산·실패 모드를 1급 제약으로 둡니다.
@@ -143,7 +171,7 @@ flowchart TB
 - 환경별로 `JUDGE_ENABLED`로 판정/정제 루프 품질–비용 조절
 - 프로바이더 이식성 (채팅: OpenAI/Gemini, 임베딩은 재임베딩 부담을 줄이도록 고정)
 
-자세한 내용: [`orchestrator/docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](orchestrator/docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md).
+자세한 내용: [`docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md).
 
 ---
 
@@ -160,13 +188,13 @@ flowchart TB
 - 개인화 RAG: PersonaRAG, PrLM
 - 평가: AgentRecBench, LaMP, PersonaBench, CiteRAG
 
-전체 서지·결정 로그: [`orchestrator/docs/MEMORY_EVOLUTION_DESIGN.md`](orchestrator/docs/MEMORY_EVOLUTION_DESIGN.md).
+전체 서지·결정 로그: [`docs/MEMORY_EVOLUTION_DESIGN.md`](docs/MEMORY_EVOLUTION_DESIGN.md).
 
 ---
 
 ## 현재 상태
 
-**클로즈드 알파**
+**클로즈드 알파** — 클라이언트는 **Android만**; 주간 논문 추천 후보는 **arXiv Atom API로만** 가져옵니다(Semantic Scholar 연동 없음; **기술 스택 → 클로즈드 알파** 참고). iOS·웹·다중 카탈로그는 이 단계 범위 밖입니다.
 
 가동 중인 것:
 
@@ -189,13 +217,13 @@ Python, `.env`, `uvicorn`, health·수집·RAG용 `curl` 예시는 **[`docs/READ
 
 | 문서 | 내용 |
 |------|------|
-| [`PERSONALIZED_MEMORY_ARCHITECTURE_DRAFT.md`](orchestrator/docs/PERSONALIZED_MEMORY_ARCHITECTURE_DRAFT.md) | 6레이어 목표 아키텍처, 현재 vs 목표, 단계 계획 |
-| [`MEMORY_EVOLUTION_DESIGN.md`](orchestrator/docs/MEMORY_EVOLUTION_DESIGN.md) | 2단계 파이프라인·설계 결정·서지 |
-| [`LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](orchestrator/docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md) | LLM 호출·프롬프트·비용·이전 전략 |
-| [`RESEARCH_KEYWORD_TREE_AND_ROADMAP.md`](orchestrator/docs/RESEARCH_KEYWORD_TREE_AND_ROADMAP.md) | 문헌 맵·연구 로드맵 |
-| [`EVALUATION_BENCHMARKS_AND_STRATEGY.md`](orchestrator/docs/EVALUATION_BENCHMARKS_AND_STRATEGY.md) | 벤치마크, LLM-as-judge, 온라인 지표 |
-| [`LAUNCH_STRATEGY_AND_REVENUE_MODEL.md`](orchestrator/docs/LAUNCH_STRATEGY_AND_REVENUE_MODEL.md) | 런칭·수익 프레이밍 |
-| [`MARKET_COMPARISON_PM_VC.md`](orchestrator/docs/MARKET_COMPARISON_PM_VC.md) | 인접 제품과의 비교 |
+| [`PERSONALIZED_MEMORY_ARCHITECTURE_DRAFT.md`](docs/PERSONALIZED_MEMORY_ARCHITECTURE_DRAFT.md) | 6레이어 목표 아키텍처, 현재 vs 목표, 단계 계획 |
+| [`MEMORY_EVOLUTION_DESIGN.md`](docs/MEMORY_EVOLUTION_DESIGN.md) | 2단계 파이프라인·설계 결정·서지 |
+| [`LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md) | LLM 호출·프롬프트·비용·이전 전략 |
+| [`RESEARCH_KEYWORD_TREE_AND_ROADMAP.md`](docs/RESEARCH_KEYWORD_TREE_AND_ROADMAP.md) | 문헌 맵·연구 로드맵 |
+| [`EVALUATION_BENCHMARKS_AND_STRATEGY.md`](docs/EVALUATION_BENCHMARKS_AND_STRATEGY.md) | 벤치마크, LLM-as-judge, 온라인 지표 |
+| [`LAUNCH_STRATEGY_AND_REVENUE_MODEL.md`](docs/LAUNCH_STRATEGY_AND_REVENUE_MODEL.md) | 런칭·수익 프레이밍 |
+| [`MARKET_COMPARISON_PM_VC.md`](docs/MARKET_COMPARISON_PM_VC.md) | 인접 제품과의 비교 |
 
 ---
 

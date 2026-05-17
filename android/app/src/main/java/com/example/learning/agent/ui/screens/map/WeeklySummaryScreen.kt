@@ -14,6 +14,7 @@ import com.example.learning.agent.data.remote.S2Api
 import com.example.learning.agent.data.repository.FeedbackRepository
 import com.example.learning.agent.data.repository.S2Cache
 import com.example.learning.agent.data.repository.S2Repository
+import com.example.learning.agent.data.repository.ThreadPrefs
 import com.example.learning.agent.data.repository.TriggerRepository
 import com.example.learning.agent.ui.components.FeedbackBottomSheet
 import com.example.learning.agent.ui.components.WeeklySummaryCard
@@ -47,7 +48,7 @@ fun WeeklySummaryScreen(
         if (showRefresh) isRefreshing = true else if (summaries.isEmpty()) isLoading = true
         loadError = null
         scope.launch {
-            when (val r = S2Repository.getS2Summaries(limit = 20)) {
+            when (val r = S2Repository.getS2Summaries(limit = 20, threadId = ThreadPrefs.getSelectedThreadId(context))) {
                 is S2Repository.Result.Success -> {
                     summaries = r.summaries
                     S2Cache.saveCachedSummaries(context, r.summaries)

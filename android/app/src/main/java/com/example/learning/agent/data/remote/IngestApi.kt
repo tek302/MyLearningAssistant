@@ -23,7 +23,8 @@ interface IngestApi {
     @POST("ingest/file")
     suspend fun ingestFile(
         @Part file: MultipartBody.Part,
-        @Part title: MultipartBody.Part
+        @Part title: MultipartBody.Part,
+        @Part thread_id: MultipartBody.Part? = null
     ): Response<IngestResponse>
 
     @GET("ingest/status")
@@ -32,7 +33,8 @@ interface IngestApi {
     data class IngestRequest(
         val type: String,  // "url" | "pdf_url" | "text"
         val content: String,
-        val title: String? = null
+        val title: String? = null,
+        @SerializedName("thread_id") val threadId: String? = null
     )
 
     data class IngestResponse(

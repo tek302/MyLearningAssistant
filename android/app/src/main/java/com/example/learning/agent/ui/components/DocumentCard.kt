@@ -153,12 +153,12 @@ fun DocumentCard(
                 }
             }
 
-            // One-sentence summary (backend: S1_TLDR_MAX_CHARS=150) — allow wrap so full text visible
+            // TLDR summary (backend: S1_TLDR_MAX_CHARS=250, up to 3 sentences)
             (document.tldr?.takeIf { it.isNotBlank() })?.let { tldr ->
                 Text(
                     text = tldr,
                     style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 5,
+                    maxLines = 8,
                     overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)

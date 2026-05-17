@@ -60,7 +60,7 @@ object IngestRepository {
         }
     }.getOrElse { "url" }
 
-    suspend fun ingestUrl(url: String, title: String? = null): Result =
+    suspend fun ingestUrl(url: String, title: String? = null, threadId: String? = null): Result =
         withContext(Dispatchers.IO) {
             val content = url.trim()
             if (content.isEmpty()) {
@@ -70,7 +70,7 @@ object IngestRepository {
                 val type = inferIngestType(content)
                 if (BuildConfig.DEBUG) Log.d(TAG, "inferIngestType url=$content type=$type")
                 val response = ApiClient.ingestApi.ingest(
-                    IngestApi.IngestRequest(type = type, content = content, title = title)
+                    IngestApi.IngestRequest(type = type, content = content, title = title, threadId = threadId)
                 )
                 if (response.isSuccessful) {
                     val body = response.body()
@@ -99,7 +99,7 @@ object IngestRepository {
      * Reads bytes from [uri] using [context]'s ContentResolver.
      * On success returns job_id; same polling flow as [ingestUrl].
      */
-    suspend fun ingestPdfFile(uri: Uri, context: Context, title: String? = null): Result =
+    suspend fun ingestPdfFile(uri: Uri, context: Context, title: String? = null, threadId: String? = null): Result =
         withContext(Dispatchers.IO) {
             try {
                 val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
@@ -121,7 +121,10 @@ object IngestRepository {
                     "title",
                     title ?: filename
                 )
-                val response = ApiClient.ingestApi.ingestFile(filePart, titlePart)
+                val threadPart = threadId?.takeIf { it.isNotBlank() }?.let {
+                    MultipartBody.Part.createFormData("thread_id", it)
+                }
+                val response = ApiClient.ingestApi.ingestFile(filePart, titlePart, threadPart)
                 if (response.isSuccessful) {
                     val body = response.body()
                     if (body != null) {

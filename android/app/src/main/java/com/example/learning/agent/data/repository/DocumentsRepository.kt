@@ -20,13 +20,15 @@ object DocumentsRepository {
     suspend fun getDocuments(
         limit: Int = 20,
         offset: Int = 0,
-        includeSummary: Boolean = false
+        includeSummary: Boolean = false,
+        threadId: String? = null
     ): Result = withContext(Dispatchers.IO) {
         try {
             val response = ApiClient.documentsApi.getDocuments(
                 limit = limit,
                 offset = offset,
                 include_summary = includeSummary,
+                threadId = threadId,
                 cacheBust = System.currentTimeMillis()
             )
             if (response.isSuccessful) {
@@ -43,6 +45,22 @@ object DocumentsRepository {
     suspend fun deleteDocument(documentId: String): Result = withContext(Dispatchers.IO) {
         try {
             val response = ApiClient.documentsApi.deleteDocument(documentId)
+            if (response.isSuccessful) {
+                Result.Success(emptyList())
+            } else {
+                Result.Error("HTTP ${response.code()}: ${response.message()}")
+            }
+        } catch (e: Exception) {
+            Result.Error(e.message ?: "Network error")
+        }
+    }
+
+    suspend fun updateDocumentThread(documentId: String, threadId: String): Result = withContext(Dispatchers.IO) {
+        try {
+            val response = ApiClient.documentsApi.patchDocument(
+                documentId,
+                DocumentsApi.PatchDocumentRequest(threadId = threadId)
+            )
             if (response.isSuccessful) {
                 Result.Success(emptyList())
             } else {

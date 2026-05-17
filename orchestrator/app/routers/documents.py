@@ -6,9 +6,10 @@ POST /documents/{document_id}/reprocess: re-queue document for processing and ru
 import asyncio
 import logging
 import uuid
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from pydantic import BaseModel, Field
 
 from ..db.pool import resolve_user_id, with_connection
 from ..db.repo import SupabaseRepo
@@ -26,38 +27,47 @@ def _list_sources(
     limit: int,
     offset: int = 0,
     include_summary: bool = False,
+    thread_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Sync: return latest N sources for user with optional S1 summary (tldr, bullets)."""
     with with_connection() as conn:
         with conn.cursor() as cur:
             user_uuid = resolve_user_id(cur, user_id)
+            thread_filter = ""
+            params_base: list[Any] = [user_uuid]
+            if thread_id:
+                try:
+                    thread_filter = " AND s.thread_id = %s"
+                    params_base.append(uuid.UUID(thread_id))
+                except ValueError:
+                    thread_filter = ""
             if include_summary:
                 cur.execute(
-                    """
+                    f"""
                     SELECT s.id, s.title, s.url, s.source_type, s.status, s.pages, s.size_mb, s.fail_code,
-                           s.created_at, s.updated_at,
+                           s.created_at, s.updated_at, s.thread_id,
                            (SELECT j.id FROM jobs j WHERE j.source_id = s.id ORDER BY j.created_at DESC LIMIT 1) AS job_id,
                            sm.tldr, sm.bullets
                     FROM sources s
                     LEFT JOIN summaries sm ON sm.source_id = s.id AND sm.scope = 'doc' AND sm.kind = 'S1'
-                    WHERE s.user_id = %s
+                    WHERE s.user_id = %s{thread_filter}
                     ORDER BY s.created_at DESC
                     LIMIT %s OFFSET %s
                     """,
-                    (user_uuid, limit, offset),
+                    (*params_base, limit, offset),
                 )
             else:
                 cur.execute(
-                    """
+                    f"""
                     SELECT s.id, s.title, s.url, s.source_type, s.status, s.pages, s.size_mb, s.fail_code,
-                           s.created_at, s.updated_at,
+                           s.created_at, s.updated_at, s.thread_id,
                            (SELECT j.id FROM jobs j WHERE j.source_id = s.id ORDER BY j.created_at DESC LIMIT 1) AS job_id
                     FROM sources s
-                    WHERE s.user_id = %s
+                    WHERE s.user_id = %s{thread_filter}
                     ORDER BY s.created_at DESC
                     LIMIT %s OFFSET %s
                     """,
-                    (user_uuid, limit, offset),
+                    (*params_base, limit, offset),
                 )
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
@@ -65,6 +75,8 @@ def _list_sources(
             for row in rows:
                 d = dict(zip(cols, row))
                 d["id"] = str(d["id"])
+                if d.get("thread_id") is not None:
+                    d["thread_id"] = str(d["thread_id"])
                 if d.get("job_id") is not None:
                     d["job_id"] = str(d["job_id"])
                 for ts in ("created_at", "updated_at"):
@@ -87,10 +99,32 @@ async def list_documents(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     include_summary: bool = Query(False, description="Include S1 summary (tldr, bullets) per document"),
+    thread_id: str | None = Query(None, description="Filter by interest_threads id"),
 ):
     """Return latest N sources for the current user, with optional pagination and summary."""
-    items = await asyncio.to_thread(_list_sources, user_id, limit, offset, include_summary)
+    items = await asyncio.to_thread(_list_sources, user_id, limit, offset, include_summary, thread_id)
     return {"documents": items}
+
+
+class PatchDocumentBody(BaseModel):
+    thread_id: str = Field(..., description="interest_threads id to assign this document to")
+
+
+@router.patch("/{document_id}", status_code=status.HTTP_200_OK)
+async def patch_document(
+    user_id: Annotated[str, Depends(get_user_id)],
+    document_id: Annotated[str, Path(description="Document (source) ID")],
+    body: PatchDocumentBody,
+):
+    """Update document metadata (e.g. move to another thread)."""
+    repo = SupabaseRepo()
+    src = await asyncio.to_thread(repo.get_source_by_id_for_user, document_id, user_id)
+    if not src:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if not await asyncio.to_thread(repo.get_interest_thread, body.thread_id, user_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid thread_id")
+    await asyncio.to_thread(repo.update_source, document_id, thread_id=body.thread_id)
+    return {"id": document_id, "thread_id": body.thread_id}
 
 
 def _delete_source_by_id(user_id: str, document_id: str) -> bool:

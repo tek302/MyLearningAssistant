@@ -23,16 +23,18 @@ class CreateNoteBody(BaseModel):
     content: str = Field(..., min_length=1, description="Note content (required)")
     source_id: Optional[str] = Field(None, description="Document (source) ID this note is attached to")
     topic: Optional[str] = Field(None, description="Short title/topic for the note")
+    thread_id: Optional[str] = Field(None, description="interest_threads id (optional)")
 
 
 @router.get("")
 async def list_notes(
     user_id: Annotated[str, Depends(get_user_id)],
     source_id: Optional[str] = Query(None, description="Filter by document (source) ID"),
+    thread_id: Optional[str] = Query(None, description="Filter by interest_threads id"),
     limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """Return notes for the current user (newest first). Optional source_id filter."""
+    """Return notes for the current user (newest first). Optional source_id / thread_id filter."""
     repo = SupabaseRepo()
     items = await asyncio.to_thread(
         repo.list_notes_for_user,
@@ -40,6 +42,7 @@ async def list_notes(
         source_id=source_id,
         limit=limit,
         offset=offset,
+        thread_id=thread_id,
     )
     return {"notes": items}
 
@@ -62,6 +65,7 @@ async def create_note(
             content=body.content,
             source_id=body.source_id,
             topic=body.topic,
+            thread_id=body.thread_id,
         )
     except Exception as e:
         logger.exception("create_note failed: %s", e)

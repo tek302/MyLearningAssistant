@@ -12,12 +12,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.models.Note
 import com.example.learning.agent.data.remote.ApiClient
 import com.example.learning.agent.data.remote.DocumentsApi
 import com.example.learning.agent.data.remote.NotesApi
+import com.example.learning.agent.data.repository.ThreadPrefs
 import com.example.learning.agent.ui.components.NoteCard
 import com.example.learning.agent.ui.theme.TekLearningAgentTheme
 import kotlinx.coroutines.launch
@@ -44,12 +46,13 @@ fun NotesScreen(
     var errorMessage by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current.applicationContext
 
     fun loadNotes() {
         scope.launch {
             isLoading = true
             errorMessage = null
-            val res = ApiClient.notesApi.getNotes()
+            val res = ApiClient.notesApi.getNotes(threadId = ThreadPrefs.getSelectedThreadId(context))
             isLoading = false
             if (res.isSuccessful) {
                 notes = res.body()?.notes?.map { Note.fromApi(it) } ?: emptyList()
@@ -62,7 +65,7 @@ fun NotesScreen(
 
     fun loadDocumentTitles() {
         scope.launch {
-            val res = ApiClient.documentsApi.getDocuments(limit = 100, include_summary = false)
+            val res = ApiClient.documentsApi.getDocuments(limit = 100, include_summary = false, threadId = ThreadPrefs.getSelectedThreadId(context))
             if (res.isSuccessful) {
                 val list = res.body()?.documents ?: emptyList()
                 documentTitleMap = list.associate { it.id to (it.title?.takeIf { t -> t.isNotBlank() } ?: it.url?.take(50) ?: "Document") }
@@ -247,7 +250,8 @@ fun NotesScreen(
                 val body = NotesApi.CreateNoteRequest(
                     content = content,
                     source_id = sourceId,
-                    topic = topic
+                    topic = topic,
+                    threadId = ThreadPrefs.getSelectedThreadId(context)
                 )
                 val pendingId = "pending-${System.currentTimeMillis()}"
                 val optimisticNote = Note(

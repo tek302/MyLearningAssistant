@@ -1,8 +1,9 @@
 import asyncio
-from typing import Annotated, Literal
+import uuid
+from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..db.pool import resolve_user_id, with_connection
 from ..db.repo import SupabaseRepo
@@ -23,6 +24,7 @@ class IngestEnqueueRequest(BaseModel):
     type: Literal["pdf_url", "url", "text"]
     content: str
     title: str | None = None
+    thread_id: Optional[str] = Field(None, description="interest_threads id (default: General)")
 
 
 class IngestEnqueueResponse(BaseModel):
@@ -31,33 +33,47 @@ class IngestEnqueueResponse(BaseModel):
     status: str = "queued"
 
 
-def _upsert_source_pending(user_id: str, source_type: str, url: str | None, title: str | None) -> str:
+def _upsert_source_pending(
+    user_id: str,
+    source_type: str,
+    url: str | None,
+    title: str | None,
+    thread_id: Optional[str] = None,
+) -> str:
     """Sync: resolve user, insert or update sources row (status=pending), return source_id.
     For pdf_url/url: ON CONFLICT (user_id, url) DO UPDATE. For text: plain INSERT.
     """
+    repo = SupabaseRepo()
+    tid = thread_id
+    if tid and not repo.get_interest_thread(tid, user_id):
+        tid = None
+    if not tid:
+        tid = repo.get_or_create_default_thread_id(user_id)
+    thread_uuid = uuid.UUID(tid)
     with with_connection() as conn:
         with conn.cursor() as cur:
             user_uuid = resolve_user_id(cur, user_id)
             if source_type in ("pdf_url", "url") and url:
                 cur.execute(
                     """
-                    INSERT INTO sources (user_id, source_type, status, url, title, lang)
-                    VALUES (%s, %s, 'pending', %s, COALESCE(%s, ''), 'en')
+                    INSERT INTO sources (user_id, source_type, status, url, title, lang, thread_id)
+                    VALUES (%s, %s, 'pending', %s, COALESCE(%s, ''), 'en', %s)
                     ON CONFLICT (user_id, url)
                     DO UPDATE SET updated_at = now(), status = 'pending', source_type = EXCLUDED.source_type,
-                                    title = COALESCE(NULLIF(EXCLUDED.title, ''), sources.title)
+                                    title = COALESCE(NULLIF(EXCLUDED.title, ''), sources.title),
+                                    thread_id = EXCLUDED.thread_id
                     RETURNING id
                     """,
-                    (user_uuid, source_type, url, title),
+                    (user_uuid, source_type, url, title, thread_uuid),
                 )
             else:
                 cur.execute(
                     """
-                    INSERT INTO sources (user_id, source_type, status, url, title, lang)
-                    VALUES (%s, %s, 'pending', %s, %s, 'en')
+                    INSERT INTO sources (user_id, source_type, status, url, title, lang, thread_id)
+                    VALUES (%s, %s, 'pending', %s, %s, 'en', %s)
                     RETURNING id
                     """,
-                    (user_uuid, source_type, url, title),
+                    (user_uuid, source_type, url, title, thread_uuid),
                 )
             row = cur.fetchone()
             return str(row[0])
@@ -94,6 +110,7 @@ async def ingest_enqueue(
         request.type,
         url_value,
         request.title,
+        request.thread_id,
     )
     job_id = repo.create_job(user_id=user_id, job_type="ingest", source_id=source_id)
     return IngestEnqueueResponse(job_id=job_id, status="queued")
@@ -105,6 +122,7 @@ async def ingest_file(
     user_id: Annotated[str, Depends(get_user_id)],
     file: Annotated[UploadFile, File(description="PDF file")],
     title: Annotated[str | None, Form()] = None,
+    thread_id: Annotated[str | None, Form()] = None,
 ):
     """Upload a local PDF for ingest. Storage + source (pdf_file) + job; process_job runs in background (B)."""
     body = await file.read()
@@ -118,7 +136,7 @@ async def ingest_file(
     repo = SupabaseRepo()
     await asyncio.to_thread(enforce_ingest_guardrails, repo, user_id)
     user_uuid = repo._get_or_create_user_id(user_id)
-    source_id = await asyncio.to_thread(repo.insert_source_pdf_file, user_id, title or None)
+    source_id = await asyncio.to_thread(repo.insert_source_pdf_file, user_id, title or None, thread_id)
     storage_path = canonical_pdf_storage_path(user_uuid, source_id)
     try:
         await asyncio.to_thread(upload_pdf, storage_path, body)

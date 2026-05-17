@@ -5,6 +5,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.*
@@ -26,7 +27,10 @@ import com.example.learning.agent.data.repository.DocumentsCache
 import com.example.learning.agent.data.repository.RefreshAndHighlightPrefs
 import com.example.learning.agent.data.repository.IngestRepository
 import com.example.learning.agent.data.repository.OnboardingPrefs
+import com.example.learning.agent.data.repository.ThreadPrefs
+import com.example.learning.agent.data.repository.ThreadsRepository
 import com.example.learning.agent.data.repository.TriggerRepository
+import com.example.learning.agent.data.remote.ThreadsApi
 import com.example.learning.agent.data.remote.ApiClient
 import com.example.learning.agent.data.remote.NotesApi
 import com.example.learning.agent.ui.components.DocumentCard
@@ -74,9 +78,16 @@ fun FeedScreen(
     var isDeletingDocument by remember { mutableStateOf(false) }
     var addNoteForDocument by remember { mutableStateOf<DocumentsApi.DocumentItem?>(null) }
     var highlightedDocumentIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val context = LocalContext.current.applicationContext
+    var threads by remember { mutableStateOf<List<ThreadsApi.InterestThreadItem>>(emptyList()) }
+    var selectedThreadId by remember { mutableStateOf<String?>(ThreadPrefs.getSelectedThreadId(context)) }
+    var threadMenuExpanded by remember { mutableStateOf(false) }
+    var showCreateThreadDialog by remember { mutableStateOf(false) }
+    var newThreadName by remember { mutableStateOf("") }
+    var newThreadDescription by remember { mutableStateOf("") }
+    var isCreatingThread by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-    val context = LocalContext.current.applicationContext
 
     val pdfPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -84,7 +95,7 @@ fun FeedScreen(
         uri ?: return@rememberLauncherForActivityResult
         isIngesting = true
         scope.launch {
-            when (val r = IngestRepository.ingestPdfFile(uri, context)) {
+            when (val r = IngestRepository.ingestPdfFile(uri, context, threadId = selectedThreadId)) {
                 is IngestRepository.Result.Success -> {
                     RefreshAndHighlightPrefs.setPendingIngestJobIdSync(context, r.jobId)
                     lastIngestJobId = r.jobId
@@ -191,7 +202,7 @@ fun FeedScreen(
         scope.launch {
             isLoading = true
             loadError = null
-            when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = offset, includeSummary = true)) {
+            when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = offset, includeSummary = true, threadId = selectedThreadId)) {
                 is DocumentsRepository.Result.Success -> {
                     val newList = if (append) documents + r.documents else r.documents
                     documents = newList
@@ -214,7 +225,7 @@ fun FeedScreen(
         scope.launch {
             isRefreshing = true
             loadError = null
-            when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = true)) {
+            when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = true, threadId = selectedThreadId)) {
                 is DocumentsRepository.Result.Success -> {
                     documents = r.documents
                     loadMoreEnabled = r.documents.size >= PAGE_SIZE
@@ -286,7 +297,18 @@ fun FeedScreen(
         }
     }
 
+    suspend fun refreshThreads() {
+        when (val tr = ThreadsRepository.refreshSelection(context)) {
+            is ThreadsRepository.Result.Success -> {
+                threads = tr.threads
+                selectedThreadId = ThreadPrefs.getSelectedThreadId(context)
+            }
+            is ThreadsRepository.Result.Error -> { /* keep local selection */ }
+        }
+    }
+
     LaunchedEffect(Unit) {
+        refreshThreads()
         val shouldRefresh = RefreshAndHighlightPrefs.shouldRefreshFromShare(context)
         highlightedDocumentIds = RefreshAndHighlightPrefs.getHighlightedDocumentIds(context)
         if (shouldRefresh) {
@@ -299,12 +321,12 @@ fun FeedScreen(
                 loadMoreEnabled = cached.size >= PAGE_SIZE
                 notifyFailedDocumentsFromList(cached)
                 // Quick sync check: compare server first-page ids with cache; if different, refresh feed (BE 수정 없이 include_summary=false 활용).
-                when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = false)) {
+                when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = false, threadId = selectedThreadId)) {
                     is DocumentsRepository.Result.Success -> {
                         val serverIds = r.documents.map { it.id }.toSet()
                         val cachedFirstIds = cached.take(PAGE_SIZE).map { it.id }.toSet()
                         if (serverIds != cachedFirstIds) {
-                            when (val r2 = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = true)) {
+                            when (val r2 = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = true, threadId = selectedThreadId)) {
                                 is DocumentsRepository.Result.Success -> {
                                     documents = r2.documents
                                     loadMoreEnabled = r2.documents.size >= PAGE_SIZE
@@ -430,6 +452,53 @@ fun FeedScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ExposedDropdownMenuBox(
+                    expanded = threadMenuExpanded,
+                    onExpandedChange = { threadMenuExpanded = it && threads.isNotEmpty() },
+                    modifier = Modifier.weight(1f)
+                ) {
+                    OutlinedTextField(
+                        modifier = Modifier.menuAnchor().fillMaxWidth(),
+                        readOnly = true,
+                        value = threads.find { it.id == selectedThreadId }?.name ?: "General",
+                        onValueChange = {},
+                        label = { Text("Thread") },
+                        enabled = threads.isNotEmpty(),
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = threadMenuExpanded) },
+                        colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = threadMenuExpanded,
+                        onDismissRequest = { threadMenuExpanded = false }
+                    ) {
+                        threads.forEach { t ->
+                            DropdownMenuItem(
+                                text = { Text(t.name) },
+                                onClick = {
+                                    selectedThreadId = t.id
+                                    ThreadPrefs.setSelectedThreadId(context, t.id)
+                                    threadMenuExpanded = false
+                                    doRefresh()
+                                }
+                            )
+                        }
+                    }
+                }
+                FilledTonalButton(
+                    onClick = { showCreateThreadDialog = true }
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Create")
+                }
+            }
             // URL input + Refresh
             Row(
                 modifier = Modifier
@@ -470,7 +539,7 @@ fun FeedScreen(
                         if (url.isEmpty()) return@IconButton
                         isIngesting = true
                         scope.launch {
-                            when (val r = IngestRepository.ingestUrl(url)) {
+                            when (val r = IngestRepository.ingestUrl(url, threadId = selectedThreadId)) {
                                 is IngestRepository.Result.Success -> {
                                     urlText = ""
                                     RefreshAndHighlightPrefs.setPendingIngestJobIdSync(context, r.jobId)
@@ -531,6 +600,76 @@ fun FeedScreen(
                             }
                         }
                     }
+
+    if (showCreateThreadDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isCreatingThread) showCreateThreadDialog = false
+            },
+            title = { Text("Create thread") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newThreadName,
+                        onValueChange = { newThreadName = it },
+                        singleLine = true,
+                        label = { Text("Name") },
+                        enabled = !isCreatingThread
+                    )
+                    OutlinedTextField(
+                        value = newThreadDescription,
+                        onValueChange = { newThreadDescription = it },
+                        label = { Text("Description (optional)") },
+                        enabled = !isCreatingThread
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !isCreatingThread && newThreadName.trim().isNotEmpty(),
+                    onClick = {
+                        scope.launch {
+                            isCreatingThread = true
+                            when (val result = ThreadsRepository.createThread(
+                                context = context,
+                                name = newThreadName,
+                                description = newThreadDescription,
+                                selectWhenCreated = true
+                            )) {
+                                is ThreadsRepository.CreateResult.Success -> {
+                                    refreshThreads()
+                                    doRefresh()
+                                    snackbarHostState.showSnackbar("Created thread: ${result.thread.name}")
+                                    newThreadName = ""
+                                    newThreadDescription = ""
+                                    showCreateThreadDialog = false
+                                }
+                                is ThreadsRepository.CreateResult.Error -> {
+                                    snackbarHostState.showSnackbar("Error: ${result.message}")
+                                }
+                            }
+                            isCreatingThread = false
+                        }
+                    }
+                ) {
+                    if (isCreatingThread) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("Create")
+                    }
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !isCreatingThread,
+                    onClick = { showCreateThreadDialog = false }
+                ) { Text("Cancel") }
+            }
+        )
+    }
                 }
             }
 
@@ -713,7 +852,8 @@ fun FeedScreen(
                     val body = NotesApi.CreateNoteRequest(
                         content = content,
                         source_id = doc.id,
-                        topic = title.takeIf { it.isNotBlank() }
+                        topic = title.takeIf { it.isNotBlank() },
+                        threadId = selectedThreadId
                     )
                     val res = ApiClient.notesApi.createNote(body)
                     if (res.isSuccessful) {

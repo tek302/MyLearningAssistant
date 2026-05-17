@@ -14,34 +14,38 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["s2"])
 
 
-def _list_s2_for_user(user_id: str, week_start: str | None, limit: int) -> List[dict[str, Any]]:
-    """Sync: return S2 summaries for user, optionally filtered by week_start."""
+def _list_s2_for_user(
+    user_id: str, week_start: str | None, thread_id: str | None, limit: int,
+) -> List[dict[str, Any]]:
+    """Sync: return S2 summaries for user, optionally filtered by week_start and/or thread_id (extra.thread_id)."""
+    import uuid as _uuid
     with with_connection() as conn:
         with conn.cursor() as cur:
             user_uuid = resolve_user_id(cur, user_id)
+            thread_clause = ""
+            params: list = [user_uuid]
             if week_start:
-                cur.execute(
-                    """
-                    SELECT id, tldr, bullets, extra, created_at
-                    FROM summaries
-                    WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
-                    AND extra->>'week_start' = %s
-                    ORDER BY (extra->>'week_start') DESC NULLS LAST, created_at DESC
-                    LIMIT %s
-                    """,
-                    (user_uuid, week_start, limit),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT id, tldr, bullets, extra, created_at
-                    FROM summaries
-                    WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
-                    ORDER BY (extra->>'week_start') DESC NULLS LAST, created_at DESC
-                    LIMIT %s
-                    """,
-                    (user_uuid, limit),
-                )
+                thread_clause += " AND extra->>'week_start' = %s"
+                params.append(week_start)
+            if thread_id:
+                try:
+                    _uuid.UUID(thread_id)
+                    thread_clause += " AND extra->>'thread_id' = %s"
+                    params.append(thread_id)
+                except ValueError:
+                    pass
+            params.append(limit)
+            cur.execute(
+                f"""
+                SELECT id, tldr, bullets, extra, created_at
+                FROM summaries
+                WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
+                {thread_clause}
+                ORDER BY (extra->>'week_start') DESC NULLS LAST, created_at DESC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
             out = []
@@ -60,8 +64,9 @@ def _list_s2_for_user(user_id: str, week_start: str | None, limit: int) -> List[
 async def list_s2(
     user_id: Annotated[str, Depends(get_user_id)],
     week_start: str | None = Query(None, description="Filter by summaries.extra.week_start (ET Friday or legacy UTC Monday)"),
+    thread_id: str | None = Query(None, description="Filter by summaries.extra.thread_id"),
     limit: int = Query(10, ge=1, le=50),
 ):
-    """Return S2 summaries for the current user. Optional week_start filter."""
-    items = await asyncio.to_thread(_list_s2_for_user, user_id, week_start, limit)
+    """Return S2 summaries for the current user. Optional week_start and thread_id filters."""
+    items = await asyncio.to_thread(_list_s2_for_user, user_id, week_start, thread_id, limit)
     return {"summaries": items}

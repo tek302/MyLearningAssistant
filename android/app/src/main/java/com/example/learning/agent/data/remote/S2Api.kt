@@ -15,6 +15,7 @@ interface S2Api {
     @GET("s2")
     suspend fun getS2Summaries(
         @Query("week_start") weekStart: String? = null,
+        @Query("thread_id") threadId: String? = null,
         @Query("limit") limit: Int = 20
     ): Response<S2Response>
 
@@ -36,6 +37,7 @@ interface S2Api {
     data class S2Extra(
         @SerializedName("week_start") val weekStart: String?,
         @SerializedName("topic_name") val topicName: String?,
+        @SerializedName("thread_id") val threadId: String? = null,
         @SerializedName("period_start_et") val periodStartEt: String? = null,
         @SerializedName("period_end_et_inclusive") val periodEndEtInclusive: String? = null,
         @SerializedName("period_tz") val periodTz: String? = null,

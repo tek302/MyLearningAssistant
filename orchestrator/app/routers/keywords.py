@@ -116,12 +116,17 @@ async def list_suggestions(
     user_id: Annotated[str, Depends(get_user_id)],
     status_filter: Optional[str] = Query(None, alias="status"),
     week_start: Optional[str] = Query(None),
+    thread_id: Optional[str] = Query(None),
     limit: int = Query(20, ge=1, le=100),
 ):
     repo = SupabaseRepo()
     items = await asyncio.to_thread(
-        repo.list_keyword_suggestions, user_id,
-        status=status_filter, week_start=week_start, limit=limit,
+        repo.list_keyword_suggestions,
+        user_id,
+        status=status_filter,
+        week_start=week_start,
+        thread_id=thread_id,
+        limit=limit,
     )
     return {"items": items}
 

@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 from typing import Dict, Any, List
@@ -16,16 +17,31 @@ def get_summary_model() -> str:
 
 
 def get_s1_max_chunks() -> int:
-    """Get maximum chunks for S1 summarization, defaulting to 8."""
+    """Get maximum chunks for S1 summarization, defaulting to 12."""
     try:
-        return int(os.getenv("S1_MAX_CHUNKS", "8"))
+        return int(os.getenv("S1_MAX_CHUNKS", "12"))
     except ValueError:
-        return 8
+        return 12
 
 
-# Feed-friendly: one sentence + 3 key points (configurable)
-S1_TLDR_MAX_CHARS = 150  # One sentence; keep short for Feed card
-S1_BULLETS_COUNT = 3     # Number of key points to show in Feed
+# Feed-friendly: short tldr (up to 3 sentences) + key points (configurable)
+S1_TLDR_MAX_CHARS = 250
+S1_TLDR_MAX_SENTENCES = 3
+S1_BULLETS_COUNT = 3
+
+
+def _truncate_tldr(tldr: str, max_chars: int, max_sentences: int) -> str:
+    """Cap tldr by sentence count, then by character length."""
+    tldr = tldr.strip()
+    if not tldr:
+        return tldr
+    max_sentences = max(1, max_sentences)
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", tldr) if p.strip()]
+    if len(parts) > max_sentences:
+        tldr = " ".join(parts[:max_sentences])
+    if len(tldr) > max_chars:
+        tldr = tldr[:max_chars].strip()
+    return tldr
 
 
 def create_s1_summary(chunks_text: str, max_retries: int = 2) -> Dict[str, Any]:
@@ -46,14 +62,15 @@ def create_s1_summary(chunks_text: str, max_retries: int = 2) -> Dict[str, Any]:
     model = get_model("s1_summary")
     client = get_chat_client()
 
-    # Build prompt: one sentence + 3 key points for Feed (keep cards short)
     tldr_max = int(os.getenv("S1_TLDR_MAX_CHARS", str(S1_TLDR_MAX_CHARS)))
+    tldr_max_sentences = int(os.getenv("S1_TLDR_MAX_SENTENCES", str(S1_TLDR_MAX_SENTENCES)))
+    tldr_max_sentences = max(1, min(5, tldr_max_sentences))
     bullets_count = int(os.getenv("S1_BULLETS_COUNT", str(S1_BULLETS_COUNT)))
     bullets_count = max(1, min(7, bullets_count))
-    prompt = f"""Summarize the following text in JSON.
+    prompt = f"""Summarize the following document text in JSON.
 
-1. tldr: ONE short sentence only (max {tldr_max} characters). No multiple sentences.
-2. bullets: Exactly {bullets_count} key points. Each point one short phrase or sentence.
+1. tldr: Up to {tldr_max_sentences} sentences (max {tldr_max} characters total). Cover the main topic and, for research papers, state the primary contribution, achievement, or key findings.
+2. bullets: Exactly {bullets_count} key points. Each point one short phrase or sentence; include method, results, or impact where relevant.
 3. tags: Optional, max 6 comma-separated keywords.
 
 Text content:
@@ -61,7 +78,7 @@ Text content:
 
 Respond in JSON only:
 {{
-  "tldr": "one sentence summary here",
+  "tldr": "summary with contribution or findings when applicable",
   "bullets": ["key point 1", "key point 2", "key point 3"],
   "tags": ["tag1", "tag2"]
 }}"""
@@ -73,7 +90,13 @@ Respond in JSON only:
             response = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that creates concise summaries in JSON format."},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a helpful assistant that creates concise document summaries in JSON format. "
+                            "For research papers, highlight the main contribution or achievement in the tldr."
+                        ),
+                    },
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
@@ -84,13 +107,12 @@ Respond in JSON only:
             content = response.choices[0].message.content
             result = json.loads(content)
             
-            # Validate and clean: one-sentence tldr, fixed number of bullets (Feed-friendly)
             tldr_max = int(os.getenv("S1_TLDR_MAX_CHARS", str(S1_TLDR_MAX_CHARS)))
+            tldr_max_sentences = int(os.getenv("S1_TLDR_MAX_SENTENCES", str(S1_TLDR_MAX_SENTENCES)))
+            tldr_max_sentences = max(1, min(5, tldr_max_sentences))
             bullets_count = int(os.getenv("S1_BULLETS_COUNT", str(S1_BULLETS_COUNT)))
             bullets_count = max(1, min(7, bullets_count))
-            tldr = result.get("tldr", "").strip()
-            if len(tldr) > tldr_max:
-                tldr = tldr[:tldr_max].strip()
+            tldr = _truncate_tldr(result.get("tldr", ""), tldr_max, tldr_max_sentences)
             bullets = result.get("bullets", [])
             if not isinstance(bullets, list):
                 bullets = []

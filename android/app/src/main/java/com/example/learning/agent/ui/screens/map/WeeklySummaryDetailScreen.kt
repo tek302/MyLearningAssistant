@@ -10,12 +10,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.remote.S2Api
 import com.example.learning.agent.data.repository.S2Repository
+import com.example.learning.agent.data.repository.ThreadPrefs
 import com.example.learning.agent.ui.components.formatS2PeriodLine
 import kotlinx.coroutines.launch
 
@@ -29,10 +31,11 @@ fun WeeklySummaryDetailScreen(
     var summary by remember { mutableStateOf<S2Api.S2SummaryItem?>(null) }
     var loading by remember { mutableStateOf(true) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current.applicationContext
 
     LaunchedEffect(id) {
         scope.launch {
-            when (val r = S2Repository.getS2Summaries(limit = 50)) {
+            when (val r = S2Repository.getS2Summaries(limit = 50, threadId = ThreadPrefs.getSelectedThreadId(context))) {
                 is S2Repository.Result.Success ->
                     summary = r.summaries.find { it.id == id }
                 is S2Repository.Result.Error -> summary = null

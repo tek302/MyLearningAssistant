@@ -134,7 +134,35 @@ Using `exp(-(delta_t/tau)^beta)` (FuXi-gamma) lets profile weights adapt over ti
 
 ---
 
-## Inference Cost and Efficiency (A Hardware Architect’s Lens)
+## Tech Stack
+
+> **Closed-alpha premise:** The product surface is intentionally narrow so the **memory → consolidation → RAG → two-stage recommendation → feedback** loop can be validated end-to-end before investing in multi-platform clients and multi-catalog feeds.
+
+### Closed alpha — scope & common questions
+
+- **Platforms:** **Android only** (Kotlin / Jetpack Compose). There is **no iOS app** and **no first-party web client** in this repository today—the FastAPI orchestrator is the natural backend if those clients are added later.
+- **“Why only arXiv for papers?”** Your **library ingest** accepts **URLs and PDFs from many sites**; the **automated weekly paper recommendations** (Stage 2) use **only the arXiv Atom API** (`export.arxiv.org/api/query`) to fetch candidates—there is **no Semantic Scholar (or other third-party paper API) integration** in this repository today. Ingest may still call arXiv for **title resolution** when the URL is arXiv. Broader catalogs (Semantic Scholar, PubMed, RSS, newsletters, etc.) are **post–closed-alpha** roadmap items.
+- **Expectations:** Treat this as **architecture + longitudinal product validation**, not a consumer-grade, fully hardened multi-tenant SaaS narrative yet.
+
+| Layer | Technologies |
+|-------|----------------|
+| **Mobile client** | Android (Kotlin), Jetpack Compose |
+| **API** | Python 3, FastAPI, Uvicorn |
+| **RAG orchestration** | LangGraph (stateful retrieve → synthesize → eval → judge → refine) |
+| **Data plane** | PostgreSQL + **pgvector** (cosine / IVFFlat-style indexing as configured in SQL migrations) |
+| **Managed services** | Supabase (Postgres + optional Storage), Firebase Authentication |
+| **LLM & embeddings** | OpenAI chat completions; `text-embedding-3-small` (1536-d) for chunks and queries; optional Gemini for chat via OpenAI-compatible endpoint |
+| **Paper APIs** | **arXiv Atom API** only (`export.arxiv.org`) — Stage 2 search + optional arXiv title fetch on ingest; **no Semantic Scholar** |
+| **Async work** | DB-backed `jobs` + worker tick / background processing for ingest, S2, and recommendation stages |
+| **Deployment** | Google Cloud Run (typical target for the orchestrator) |
+
+**Ingest & parsing (orchestrator):** HTML via BeautifulSoup; PDF via PyMuPDF (page/size limits enforced in config).
+
+Model tiers, env vars, and cost notes: [`docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md).
+
+---
+
+## Inference Cost and Efficiency
 
 This system treats latency, token budget, and failure modes as first-class constraints:
 
@@ -143,7 +171,7 @@ This system treats latency, token budget, and failure modes as first-class const
 - Optional judge/refine gating (`JUDGE_ENABLED`) to tune quality–cost tradeoffs by environment
 - Provider portability (OpenAI / Gemini for chat; stable embedding strategy to avoid re-embedding churn)
 
-See [`orchestrator/docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md).
+See [`docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md`](docs/LLM_USAGE_INVENTORY_MODEL_STRATEGY.md).
 
 ---
 
@@ -166,7 +194,7 @@ Full bibliography and decision log: [`docs/MEMORY_EVOLUTION_DESIGN.md`](docs/MEM
 
 ## Current Status
 
-**Closed Alpha**
+**Closed Alpha** — Android-only client; weekly paper recommendations fetch candidates **only via the arXiv Atom API** (no Semantic Scholar integration; see **Tech Stack → Closed alpha**). iOS / web / multi-catalog feeds are out of scope for this phase.
 
 Implemented and running:
 

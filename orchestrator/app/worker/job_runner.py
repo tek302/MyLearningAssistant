@@ -57,53 +57,23 @@ async def process_job(job_id: str) -> None:
         week_start_used = resolve_s2_week_start_key(week_start, now)
         repo.update_job(job_id, state="running", progress=10)
         try:
-            from app.services.s2_consolidation import run_s2_consolidation
-            ok, reason = await asyncio.to_thread(run_s2_consolidation, user_id, week_start, 7, now)
+            from app.services.s2_consolidation import run_s2_consolidation_all_threads
+            ok, reason = await asyncio.to_thread(
+                run_s2_consolidation_all_threads, user_id, week_start, 7, now
+            )
             if ok:
-                from app.services.arxiv_recommendations import run_arxiv_recommendations_for_week
+                merge_payload: dict = {}
                 try:
-                    count, rec_error, rec_debug = await asyncio.to_thread(
-                        run_arxiv_recommendations_for_week, user_id, week_start_used, None
-                    )
-                    if count == 0 and rec_error:
-                        err_text = str(rec_error)[:_REC_ERROR_MAX_LEN]
-                        merge: dict = {
-                            "recommendations_failed": True,
-                            "recommendation_error": err_text,
-                        }
-                        if isinstance(rec_debug, dict) and rec_debug.get("arxiv_search"):
-                            merge["arxiv_search"] = rec_debug["arxiv_search"]
-                        repo.update_job(
-                            job_id,
-                            state="done",
-                            progress=100,
-                            payload_merge=merge,
-                        )
-                    else:
-                        merge_done: dict = {}
-                        if isinstance(rec_debug, dict) and rec_debug.get("arxiv_search"):
-                            ax = rec_debug["arxiv_search"]
-                            if ax.get("fallback_used"):
-                                merge_done["arxiv_search"] = ax
-                        if merge_done:
-                            repo.update_job(job_id, state="done", progress=100, payload_merge=merge_done)
-                        else:
-                            repo.update_job(job_id, state="done", progress=100)
-                except Exception as rec_ex:
-                    logger.warning("job_id=%s recommendations failed (S2 succeeded): %s", job_id, rec_ex)
-                    err_text = str(rec_ex)[:_REC_ERROR_MAX_LEN]
-                    repo.update_job(
-                        job_id,
-                        state="done",
-                        progress=100,
-                        payload_merge={
-                            "recommendations_failed": True,
-                            "recommendation_error": err_text,
-                        },
-                    )
-
-                # 2-Stage Pipeline chain: S2 → keyword_weight_recalc → stage1_keyword_expansion
-                await _run_keyword_pipeline_after_s2(repo, user_id, week_start_used)
+                    await _run_post_s2_pipeline(repo, user_id, week_start_used, merge_payload)
+                except Exception as pipe_ex:
+                    logger.warning("job_id=%s post-S2 pipeline failed: %s", job_id, pipe_ex)
+                    merge_payload["post_s2_pipeline_error"] = str(pipe_ex)[:_REC_ERROR_MAX_LEN]
+                repo.update_job(
+                    job_id,
+                    state="done",
+                    progress=100,
+                    payload_merge=merge_payload if merge_payload else None,
+                )
             else:
                 repo.update_job(job_id, state="done", progress=100, error=reason or "s2 skipped")
         except Exception as e:
@@ -135,13 +105,14 @@ async def process_job(job_id: str) -> None:
             return
         payload = job.get("payload") or {}
         week_start = payload.get("week_start") if isinstance(payload, dict) else None
+        thread_id = payload.get("thread_id") if isinstance(payload, dict) else None
         if not week_start:
             week_start = resolve_s2_week_start_key(None, datetime.now(timezone.utc))
         repo.update_job(job_id, state="running", progress=10)
         try:
             from app.services.keyword_expansion import run_keyword_expansion
             suggestion_ids, error = await asyncio.to_thread(
-                run_keyword_expansion, user_id, week_start, repo
+                run_keyword_expansion, user_id, week_start, repo, thread_id
             )
             if error:
                 repo.update_job(job_id, state="done", progress=100, payload_merge={
@@ -290,7 +261,7 @@ async def process_job(job_id: str) -> None:
 
 
 async def _run_keyword_pipeline_after_s2(repo: SupabaseRepo, user_id: str, week_start: str) -> None:
-    """Chain: keyword_weight_recalc → stage1_keyword_expansion, triggered after S2 completes."""
+    """Chain: keyword_weight_recalc → stage1 per thread (legacy single-call path)."""
     try:
         from app.services.keyword_weight import recalc_keyword_weights
         result = await asyncio.to_thread(recalc_keyword_weights, user_id, repo)
@@ -300,11 +271,61 @@ async def _run_keyword_pipeline_after_s2(repo: SupabaseRepo, user_id: str, week_
 
     try:
         from app.services.keyword_expansion import run_keyword_expansion
-        suggestion_ids, error = await asyncio.to_thread(run_keyword_expansion, user_id, week_start, repo)
-        if error:
-            logger.info("post-S2 stage1_keyword_expansion partial: %s", error)
-        else:
-            logger.info("post-S2 stage1_keyword_expansion done: %d suggestions", len(suggestion_ids))
+        threads = repo.list_interest_threads(user_id, include_archived=False)
+        for t in threads:
+            suggestion_ids, error = await asyncio.to_thread(
+                run_keyword_expansion, user_id, week_start, repo, str(t["id"]),
+            )
+            if error:
+                logger.info("post-S2 stage1 thread=%s partial: %s", t["id"], error)
+            else:
+                logger.info("post-S2 stage1 thread=%s suggestions=%d", t["id"], len(suggestion_ids))
     except Exception as e:
         logger.warning("post-S2 stage1_keyword_expansion failed: %s", e)
+
+
+async def _run_post_s2_pipeline(
+    repo: SupabaseRepo, user_id: str, week_start: str, merge_out: dict,
+) -> None:
+    """After all-thread S2: recalc weights once → Stage1 per thread → Stage2 per thread."""
+    try:
+        from app.services.keyword_weight import recalc_keyword_weights
+        result = await asyncio.to_thread(recalc_keyword_weights, user_id, repo)
+        logger.info("post-S2 keyword_weight_recalc done: %s", result)
+    except Exception as e:
+        logger.warning("post-S2 keyword_weight_recalc failed: %s", e)
+
+    threads = repo.list_interest_threads(user_id, include_archived=False)
+    from app.services.keyword_expansion import run_keyword_expansion
+    from app.services.arxiv_recommendations import run_arxiv_recommendations_for_week
+
+    for t in threads:
+        tid = str(t["id"])
+        try:
+            suggestion_ids, err = await asyncio.to_thread(
+                run_keyword_expansion, user_id, week_start, repo, tid,
+            )
+            logger.info("post-S2 stage1 thread=%s err=%s count=%s", tid, err, len(suggestion_ids))
+        except Exception as e:
+            logger.warning("post-S2 stage1 thread=%s failed: %s", tid, e)
+
+    rec_failed = 0
+    for t in threads:
+        tid = str(t["id"])
+        try:
+            count, rec_error, rec_debug = await asyncio.to_thread(
+                run_arxiv_recommendations_for_week, user_id, week_start, None, repo, tid,
+            )
+            if count == 0 and rec_error:
+                rec_failed += 1
+                logger.info("post-S2 arxiv thread=%s: %s", tid, rec_error)
+            if isinstance(rec_debug, dict) and rec_debug.get("arxiv_search"):
+                ax = rec_debug["arxiv_search"]
+                if ax.get("fallback_used"):
+                    merge_out.setdefault("arxiv_search_threads", []).append({"thread_id": tid, "arxiv_search": ax})
+        except Exception as e:
+            rec_failed += 1
+            logger.warning("post-S2 arxiv thread=%s failed: %s", tid, e)
+    if rec_failed:
+        merge_out["recommendations_threads_failed"] = rec_failed
 

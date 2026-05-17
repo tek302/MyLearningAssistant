@@ -19,10 +19,11 @@ object S2Repository {
 
     suspend fun getS2Summaries(
         weekStart: String? = null,
+        threadId: String? = null,
         limit: Int = 20
     ): Result = withContext(Dispatchers.IO) {
         try {
-            val response = ApiClient.s2Api.getS2Summaries(weekStart = weekStart, limit = limit)
+            val response = ApiClient.s2Api.getS2Summaries(weekStart = weekStart, threadId = threadId, limit = limit)
             if (response.isSuccessful) {
                 val list = response.body()?.summaries ?: emptyList()
                 Result.Success(list)

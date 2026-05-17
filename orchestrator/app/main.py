@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI
 
 from app.config import load_env
 from app.db.pool import close_pool, init_pool
-from app.routers import documents, graph_test, ingest, ingest_status, notes, rag, recommendations, s2, s2_list, worker
+from app.routers import documents, graph_test, ingest, ingest_status, notes, rag, recommendations, s2, s2_list, threads, worker
 from app.routers import feedback, admin_feedback, admin_users, admin_eval, keywords, recommendation_debug
 from app.utils.deps import get_user_id
 
@@ -43,6 +43,7 @@ app.include_router(s2.router)
 app.include_router(s2_list.router)
 app.include_router(recommendations.router)
 app.include_router(keywords.router)
+app.include_router(threads.router)
 app.include_router(recommendation_debug.router)
 app.include_router(admin_eval.router)
 

@@ -13,6 +13,7 @@ interface RecommendationsApi {
     suspend fun list(
         @Query("week_start") weekStart: String? = null,
         @Query("topic_name") topicName: String? = null,
+        @Query("thread_id") threadId: String? = null,
         @Query("limit") limit: Int = 50
     ): Response<ListResponse>
 
@@ -35,6 +36,7 @@ interface RecommendationsApi {
         val url: String,
         val source: String,
         val score: Float?,
+        @SerializedName("thread_id") val threadId: String? = null,
         @SerializedName("created_at") val createdAt: String?
     )
 

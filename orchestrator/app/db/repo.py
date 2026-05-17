@@ -138,14 +138,260 @@ class SupabaseRepo:
                     cur.execute("SELECT id FROM users WHERE firebase_uid = %s", (user_identifier,))
                     row = cur.fetchone()
                     return str(row[0]) if row else None
-    
+
+    # --- Interest threads (multi-thread + global keyword pool B) ---
+
+    def get_or_create_default_thread_id(self, user_id: str) -> str:
+        """Return the user's default interest_thread id, creating 'General' if missing."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id FROM interest_threads
+                    WHERE user_id = %s AND is_default = true
+                    LIMIT 1
+                    """,
+                    (user_uuid,),
+                )
+                row = cur.fetchone()
+                if row:
+                    return str(row[0])
+                cur.execute(
+                    """
+                    INSERT INTO interest_threads (user_id, name, description, is_default)
+                    VALUES (%s, 'General', 'Default research thread', true)
+                    RETURNING id
+                    """,
+                    (user_uuid,),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
+    def list_interest_threads(
+        self, user_id: str, include_archived: bool = False
+    ) -> List[Dict[str, Any]]:
+        """List threads for user, newest first. Omits archived unless include_archived."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                q = """
+                    SELECT id, name, description, is_default, archived_at, created_at, updated_at
+                    FROM interest_threads
+                    WHERE user_id = %s
+                """
+                params: List[Any] = [user_uuid]
+                if not include_archived:
+                    q += " AND archived_at IS NULL"
+                q += " ORDER BY is_default DESC, created_at ASC"
+                cur.execute(q, params)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out: List[Dict[str, Any]] = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    d["id"] = str(d["id"])
+                    for ts_col in ("archived_at", "created_at", "updated_at"):
+                        if d.get(ts_col) is not None:
+                            d[ts_col] = d[ts_col].isoformat() if hasattr(d[ts_col], "isoformat") else str(d[ts_col])
+                    out.append(d)
+                return out
+
+    def get_interest_thread(self, thread_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Return one thread if owned by user."""
+        try:
+            tid = uuid.UUID(thread_id)
+        except ValueError:
+            return None
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, name, description, is_default, archived_at, created_at, updated_at
+                    FROM interest_threads
+                    WHERE id = %s AND user_id = %s
+                    """,
+                    (tid, user_uuid),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                cols = [d[0] for d in cur.description]
+                d = dict(zip(cols, row))
+                d["id"] = str(d["id"])
+                for ts_col in ("archived_at", "created_at", "updated_at"):
+                    if d.get(ts_col) is not None:
+                        d[ts_col] = d[ts_col].isoformat() if hasattr(d[ts_col], "isoformat") else str(d[ts_col])
+                return d
+
+    def create_interest_thread(
+        self, user_id: str, name: str, description: Optional[str] = None, is_default: bool = False
+    ) -> str:
+        """Create a thread. If is_default, clears default flag on other rows for this user."""
+        user_uuid = self._get_or_create_user_id(user_id)
+        nm = (name or "").strip()
+        if not nm:
+            raise ValueError("name is required")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                if is_default:
+                    cur.execute(
+                        "UPDATE interest_threads SET is_default = false, updated_at = now() WHERE user_id = %s",
+                        (user_uuid,),
+                    )
+                cur.execute(
+                    """
+                    INSERT INTO interest_threads (user_id, name, description, is_default)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (user_uuid, nm, (description or "").strip() or None, is_default),
+                )
+                row = cur.fetchone()
+                conn.commit()
+                return str(row[0])
+
+    def update_interest_thread(
+        self,
+        thread_id: str,
+        user_id: str,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> bool:
+        """Patch name/description. Returns True if updated."""
+        try:
+            tid = uuid.UUID(thread_id)
+        except ValueError:
+            return False
+        user_uuid = self._get_or_create_user_id(user_id)
+        sets: List[str] = ["updated_at = now()"]
+        params: List[Any] = []
+        if name is not None:
+            sets.append("name = %s")
+            params.append((name or "").strip() or "Untitled")
+        if description is not None:
+            sets.append("description = %s")
+            params.append((description or "").strip() or None)
+        if len(sets) <= 1:
+            return False
+        params.extend([tid, user_uuid])
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE interest_threads SET {', '.join(sets)} WHERE id = %s AND user_id = %s",
+                    params,
+                )
+                n = cur.rowcount
+                conn.commit()
+                return n > 0
+
+    def archive_interest_thread(self, thread_id: str, user_id: str) -> bool:
+        """Soft-archive thread (cannot archive sole default without another default — caller avoids)."""
+        try:
+            tid = uuid.UUID(thread_id)
+        except ValueError:
+            return False
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE interest_threads
+                    SET archived_at = now(), updated_at = now()
+                    WHERE id = %s AND user_id = %s AND is_default = false
+                    """,
+                    (tid, user_uuid),
+                )
+                n = cur.rowcount
+                conn.commit()
+                return n > 0
+
+    def list_thread_keyword_weights(self, thread_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """Junction rows for a thread (ownership via thread.user_id)."""
+        try:
+            tid = uuid.UUID(thread_id)
+        except ValueError:
+            return []
+        user_uuid = self._get_or_create_user_id(user_id)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT w.id, w.thread_id, w.user_keyword_id, w.weight_multiplier, w.activation,
+                           w.created_at, w.updated_at
+                    FROM thread_keyword_weights w
+                    INNER JOIN interest_threads t ON t.id = w.thread_id
+                    WHERE w.thread_id = %s AND t.user_id = %s
+                    """,
+                    (tid, user_uuid),
+                )
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                out: List[Dict[str, Any]] = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    d["id"] = str(d["id"])
+                    d["thread_id"] = str(d["thread_id"])
+                    d["user_keyword_id"] = str(d["user_keyword_id"])
+                    for ts_col in ("created_at", "updated_at"):
+                        if d.get(ts_col) is not None:
+                            d[ts_col] = d[ts_col].isoformat() if hasattr(d[ts_col], "isoformat") else str(d[ts_col])
+                    out.append(d)
+                return out
+
+    def upsert_thread_keyword_weight(
+        self,
+        thread_id: str,
+        user_keyword_id: str,
+        user_id: str,
+        activation: float = 1.0,
+        weight_multiplier: float = 1.0,
+    ) -> None:
+        """Ensure junction row exists; clamp activation to [0,1]."""
+        try:
+            tid = uuid.UUID(thread_id)
+            kwid = uuid.UUID(user_keyword_id)
+        except ValueError:
+            raise ValueError("invalid thread_id or user_keyword_id")
+        user_uuid = self._get_or_create_user_id(user_id)
+        act = max(0.0, min(1.0, float(activation)))
+        mult = max(0.01, float(weight_multiplier))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1 FROM interest_threads t
+                    INNER JOIN user_keywords k ON k.user_id = t.user_id
+                    WHERE t.id = %s AND t.user_id = %s AND k.id = %s
+                    """,
+                    (tid, user_uuid, kwid),
+                )
+                if not cur.fetchone():
+                    raise ValueError("thread or keyword not owned by user")
+                cur.execute(
+                    """
+                    INSERT INTO thread_keyword_weights (thread_id, user_keyword_id, activation, weight_multiplier)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (thread_id, user_keyword_id)
+                    DO UPDATE SET
+                        activation = EXCLUDED.activation,
+                        weight_multiplier = EXCLUDED.weight_multiplier,
+                        updated_at = now()
+                    """,
+                    (tid, kwid, act, mult),
+                )
+                conn.commit()
+
     def insert_source(
-        self, 
-        user_id: str, 
-        url: str, 
-        title: str, 
-        lang: str, 
-        meta: Optional[Dict[str, Any]] = None
+        self,
+        user_id: str,
+        url: str,
+        title: str,
+        lang: str,
+        meta: Optional[Dict[str, Any]] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
         """
         Insert a new source or return existing source_id if already exists.
@@ -156,15 +402,32 @@ class SupabaseRepo:
             title: Source title
             lang: Language code
             meta: Optional metadata dictionary
+            thread_id: Optional interest_thread id; defaults to user's General thread when omitted
             
         Returns:
             source_id: The ID of the inserted or existing source
         """
         # Get or create user UUID
         user_uuid = self._get_or_create_user_id(user_id)
-        
+        default_tid = uuid.UUID(self.get_or_create_default_thread_id(user_id))
+        thread_uuid = default_tid
+        if thread_id:
+            try:
+                candidate = uuid.UUID(thread_id)
+            except ValueError:
+                candidate = default_tid
+            else:
+                thread_uuid = candidate
+
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                if thread_uuid != default_tid:
+                    cur.execute(
+                        "SELECT 1 FROM interest_threads WHERE id = %s AND user_id = %s",
+                        (thread_uuid, user_uuid),
+                    )
+                    if not cur.fetchone():
+                        thread_uuid = default_tid
                 # First, try to find existing source
                 cur.execute(
                     """
@@ -180,11 +443,18 @@ class SupabaseRepo:
                 try:
                     cur.execute(
                         """
-                        INSERT INTO sources (user_id, url, title, lang, meta)
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO sources (user_id, url, title, lang, meta, thread_id)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                         RETURNING id
                         """,
-                        (user_uuid, url, title, lang, psycopg.types.json.Jsonb(meta) if meta else None)
+                        (
+                            user_uuid,
+                            url,
+                            title,
+                            lang,
+                            psycopg.types.json.Jsonb(meta) if meta else None,
+                            thread_uuid,
+                        ),
                     )
                     result = cur.fetchone()
                     conn.commit()
@@ -203,22 +473,38 @@ class SupabaseRepo:
                         return str(result[0])
                     raise
 
-    def insert_source_pdf_file(self, user_id: str, title: Optional[str] = None) -> str:
+    def insert_source_pdf_file(
+        self, user_id: str, title: Optional[str] = None, thread_id: Optional[str] = None
+    ) -> str:
         """
         Insert a new source for Local PDF upload (source_type=pdf_file, url=NULL).
         Caller must then upload to Storage and update meta (storage_path, original_filename).
         Returns source_id (UUID string).
         """
         user_uuid = self._get_or_create_user_id(user_id)
+        default_tid = uuid.UUID(self.get_or_create_default_thread_id(user_id))
+        thread_uuid = default_tid
+        if thread_id:
+            try:
+                thread_uuid = uuid.UUID(thread_id)
+            except ValueError:
+                thread_uuid = default_tid
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                if thread_uuid != default_tid:
+                    cur.execute(
+                        "SELECT 1 FROM interest_threads WHERE id = %s AND user_id = %s",
+                        (thread_uuid, user_uuid),
+                    )
+                    if not cur.fetchone():
+                        thread_uuid = default_tid
                 cur.execute(
                     """
-                    INSERT INTO sources (user_id, source_type, status, url, title, lang)
-                    VALUES (%s, 'pdf_file', 'pending', NULL, %s, 'en')
+                    INSERT INTO sources (user_id, source_type, status, url, title, lang, thread_id)
+                    VALUES (%s, 'pdf_file', 'pending', NULL, %s, 'en', %s)
                     RETURNING id
                     """,
-                    (user_uuid, title or ""),
+                    (user_uuid, title or "", thread_uuid),
                 )
                 row = cur.fetchone()
                 conn.commit()
@@ -426,23 +712,41 @@ class SupabaseRepo:
                 return [dict(zip(cols, row)) for row in rows]
 
     def get_sources_for_user_between(
-        self, user_id: str, start_ts: datetime, end_ts: datetime
+        self,
+        user_id: str,
+        start_ts: datetime,
+        end_ts: datetime,
+        thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return sources for user where start_ts <= created_at < end_ts. For week-based S2."""
+        """Return sources for user where start_ts <= created_at < end_ts. For week-based S2.
+        When thread_id is set, only sources with that interest_threads.id are included."""
         user_uuid = self._get_or_create_user_id(user_id)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT id, created_at FROM sources
+                q = """
+                    SELECT id, created_at, thread_id FROM sources
                     WHERE user_id = %s AND created_at >= %s AND created_at < %s
-                    ORDER BY created_at ASC
-                    """,
-                    (user_uuid, start_ts, end_ts),
-                )
+                """
+                params: List[Any] = [user_uuid, start_ts, end_ts]
+                if thread_id:
+                    try:
+                        tid = uuid.UUID(thread_id)
+                        q += " AND thread_id = %s"
+                        params.append(tid)
+                    except ValueError:
+                        pass
+                q += " ORDER BY created_at ASC"
+                cur.execute(q, params)
                 cols = [d[0] for d in cur.description]
                 rows = cur.fetchall()
-                return [dict(zip(cols, row)) for row in rows]
+                out = []
+                for row in rows:
+                    d = dict(zip(cols, row))
+                    d["id"] = str(d["id"])
+                    if d.get("thread_id") is not None:
+                        d["thread_id"] = str(d["thread_id"])
+                    out.append(d)
+                return out
 
     def get_user_ids_with_sources_since(self, days: int = 7) -> List[str]:
         """Return distinct user_id (UUID string) that have at least one source created in the last `days` days. For S2 schedule."""
@@ -482,19 +786,30 @@ class SupabaseRepo:
                         o["source_id"] = str(o["source_id"])
                 return out
 
-    def delete_s2_for_user_week(self, user_id: str, week_start: str) -> int:
-        """Delete existing S2 summary for user and week_start. Returns deleted count."""
+    def delete_s2_for_user_week(self, user_id: str, week_start: str, thread_id: Optional[str] = None) -> int:
+        """Delete existing S2 for user, week_start, and optional thread_id (extra.thread_id). Returns deleted count."""
         user_uuid = self._get_or_create_user_id(user_id)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    DELETE FROM summaries
-                    WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
-                    AND extra->>'week_start' = %s
-                    """,
-                    (user_uuid, week_start),
-                )
+                if thread_id:
+                    cur.execute(
+                        """
+                        DELETE FROM summaries
+                        WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
+                        AND extra->>'week_start' = %s AND extra->>'thread_id' = %s
+                        """,
+                        (user_uuid, week_start, thread_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        DELETE FROM summaries
+                        WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
+                        AND extra->>'week_start' = %s
+                        AND (extra->>'thread_id' IS NULL OR extra->>'thread_id' = '')
+                        """,
+                        (user_uuid, week_start),
+                    )
                 deleted = cur.rowcount
                 conn.commit()
                 return deleted
@@ -508,10 +823,12 @@ class SupabaseRepo:
         source_ids: Optional[List[str]] = None,
         topic_name: str = "This Week",
         extra_meta: Optional[Dict[str, Any]] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
-        """Insert S2 (topic-scope) summary. source_id is NULL. extra has week_start, topic_name, source_ids."""
+        """Insert S2 (topic-scope) summary. source_id is NULL. extra has week_start, topic_name, source_ids, thread_id."""
         user_uuid = self._get_or_create_user_id(user_id)
-        extra = {"week_start": week_start, "topic_name": topic_name}
+        tid = thread_id or self.get_or_create_default_thread_id(user_id)
+        extra = {"week_start": week_start, "topic_name": topic_name, "thread_id": tid}
         if source_ids:
             extra["source_ids"] = source_ids
         if extra_meta:
@@ -530,9 +847,12 @@ class SupabaseRepo:
                 conn.commit()
                 return str(row[0])
 
-    def get_s2_for_user_week(self, user_id: str, week_start: str) -> Optional[Dict[str, Any]]:
-        """Return S2 summary for user and week_start (tldr, bullets, id). None if not found. For arXiv recommendations."""
+    def get_s2_for_user_week(
+        self, user_id: str, week_start: str, thread_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return S2 for user, week_start, and thread_id (extra.thread_id). Uses default thread when thread_id is None."""
         user_uuid = self._get_or_create_user_id(user_id)
+        tid = thread_id or self.get_or_create_default_thread_id(user_id)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -541,10 +861,11 @@ class SupabaseRepo:
                     FROM summaries
                     WHERE user_id = %s AND scope = 'topic' AND kind = 'S2'
                     AND extra->>'week_start' = %s
+                    AND extra->>'thread_id' = %s
                     ORDER BY created_at DESC
                     LIMIT 1
                     """,
-                    (user_uuid, week_start),
+                    (user_uuid, week_start, tid),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -771,7 +1092,7 @@ class SupabaseRepo:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, user_id, url, source_type, status, title, lang, meta, pages, size_mb, char_count, fail_code
+                    SELECT id, user_id, url, source_type, status, title, lang, meta, pages, size_mb, char_count, fail_code, thread_id
                     FROM sources
                     WHERE id = %s AND user_id = %s
                     """,
@@ -784,6 +1105,8 @@ class SupabaseRepo:
                 out = dict(zip(cols, row))
                 out["id"] = str(out["id"])
                 out["user_id"] = str(out["user_id"])
+                if out.get("thread_id") is not None:
+                    out["thread_id"] = str(out["thread_id"])
                 if out.get("meta") is not None and hasattr(out["meta"], "copy"):
                     out["meta"] = dict(out["meta"])
                 return out
@@ -1168,7 +1491,7 @@ class SupabaseRepo:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, user_id, url, source_type, status, title, lang, meta, pages, size_mb, char_count, fail_code
+                    SELECT id, user_id, url, source_type, status, title, lang, meta, pages, size_mb, char_count, fail_code, thread_id
                     FROM sources WHERE id = %s
                     """,
                     (source_id,),
@@ -1180,6 +1503,8 @@ class SupabaseRepo:
                 out = dict(zip(cols, row))
                 out["id"] = str(out["id"])
                 out["user_id"] = str(out["user_id"])
+                if out.get("thread_id") is not None:
+                    out["thread_id"] = str(out["thread_id"])
                 if out.get("meta") is not None and hasattr(out["meta"], "copy"):
                     out["meta"] = dict(out["meta"])
                 return out
@@ -1195,6 +1520,7 @@ class SupabaseRepo:
         char_count: Optional[int] = None,
         size_mb: Optional[float] = None,
         fail_code: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> None:
         """Update source fields. Only non-None args are updated."""
         updates: List[str] = []
@@ -1223,6 +1549,15 @@ class SupabaseRepo:
         if fail_code is not None:
             updates.append("fail_code = %s")
             params.append(fail_code)
+        if thread_id is not None:
+            updates.append("thread_id = %s")
+            if thread_id == "":
+                params.append(None)
+            else:
+                try:
+                    params.append(uuid.UUID(thread_id))
+                except ValueError:
+                    params.append(None)
         if not updates:
             return
         params.append(source_id)
@@ -1246,18 +1581,25 @@ class SupabaseRepo:
         url: str,
         source: str = "arXiv",
         score: Optional[float] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
         """Insert one recommendation row. Returns recommendation id."""
         user_uuid = self._get_or_create_user_id(user_id)
+        tid = None
+        if thread_id:
+            try:
+                tid = uuid.UUID(thread_id)
+            except ValueError:
+                tid = None
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO recommendations (user_id, topic_name, week_start, title, abstract, url, source, score)
-                    VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s)
+                    INSERT INTO recommendations (user_id, topic_name, week_start, title, abstract, url, source, score, thread_id)
+                    VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (user_uuid, topic_name, week_start, title, abstract or "", url, source, score),
+                    (user_uuid, topic_name, week_start, title, abstract or "", url, source, score, tid),
                 )
                 row = cur.fetchone()
                 conn.commit()
@@ -1268,14 +1610,15 @@ class SupabaseRepo:
         user_id: str,
         week_start: Optional[str] = None,
         topic_name: Optional[str] = None,
+        thread_id: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
-        """List recommendations for user, newest first. Optional filter by week_start, topic_name."""
+        """List recommendations for user, newest first. Optional filter by week_start, topic_name, thread_id."""
         user_uuid = self._get_or_create_user_id(user_id)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 q = """
-                    SELECT id, topic_name, week_start, title, abstract, url, source, score, created_at
+                    SELECT id, topic_name, week_start, title, abstract, url, source, score, thread_id, created_at
                     FROM recommendations
                     WHERE user_id = %s
                 """
@@ -1286,6 +1629,12 @@ class SupabaseRepo:
                 if topic_name:
                     q += " AND topic_name = %s"
                     params.append(topic_name)
+                if thread_id:
+                    try:
+                        q += " AND thread_id = %s"
+                        params.append(uuid.UUID(thread_id))
+                    except ValueError:
+                        pass
                 q += " ORDER BY created_at DESC LIMIT %s"
                 params.append(limit)
                 cur.execute(q, params)
@@ -1295,6 +1644,8 @@ class SupabaseRepo:
                 for row in rows:
                     d = dict(zip(cols, row))
                     d["id"] = str(d["id"])
+                    if d.get("thread_id") is not None:
+                        d["thread_id"] = str(d["thread_id"])
                     if d.get("week_start") is not None:
                         d["week_start"] = d["week_start"].isoformat() if hasattr(d["week_start"], "isoformat") else str(d["week_start"])
                     if d.get("created_at") is not None:
@@ -1309,7 +1660,7 @@ class SupabaseRepo:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT id, topic_name, week_start, title, abstract, url, source, score, created_at
+                    SELECT id, topic_name, week_start, title, abstract, url, source, score, thread_id, created_at
                     FROM recommendations
                     WHERE id = %s AND user_id = %s
                     """,
@@ -1321,6 +1672,8 @@ class SupabaseRepo:
                 cols = [d[0] for d in cur.description]
                 d = dict(zip(cols, row))
                 d["id"] = str(d["id"])
+                if d.get("thread_id") is not None:
+                    d["thread_id"] = str(d["thread_id"])
                 if d.get("week_start") is not None:
                     d["week_start"] = d["week_start"].isoformat() if hasattr(d["week_start"], "isoformat") else str(d["week_start"])
                 if d.get("created_at") is not None:
@@ -1349,13 +1702,14 @@ class SupabaseRepo:
         since_ts: Optional[datetime] = None,
         limit: int = 100,
         offset: int = 0,
+        thread_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """List notes for user, newest first. Optional filter by source_id or created_at >= since_ts."""
+        """List notes for user, newest first. Optional filter by source_id, thread_id, or created_at >= since_ts."""
         user_uuid = self._get_or_create_user_id(user_id)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 q = """
-                    SELECT id, source_id, chunk_id, topic, content, created_at
+                    SELECT id, source_id, chunk_id, topic, content, thread_id, created_at
                     FROM notes
                     WHERE user_id = %s
                 """
@@ -1365,6 +1719,12 @@ class SupabaseRepo:
                         uuid.UUID(source_id)
                         q += " AND source_id = %s"
                         params.append(source_id)
+                    except ValueError:
+                        pass
+                if thread_id:
+                    try:
+                        q += " AND thread_id = %s"
+                        params.append(uuid.UUID(thread_id))
                     except ValueError:
                         pass
                 if since_ts is not None:
@@ -1380,7 +1740,7 @@ class SupabaseRepo:
                 for row in rows:
                     d = dict(zip(cols, row))
                     d["id"] = str(d["id"])
-                    for col in ("source_id", "chunk_id"):
+                    for col in ("source_id", "chunk_id", "thread_id"):
                         if d.get(col) is not None:
                             d[col] = str(d[col])
                     if d.get("created_at") is not None:
@@ -1395,6 +1755,7 @@ class SupabaseRepo:
         source_id: Optional[str] = None,
         chunk_id: Optional[str] = None,
         topic: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
         """Insert one note. Returns note id."""
         user_uuid = self._get_or_create_user_id(user_id)
@@ -1410,15 +1771,21 @@ class SupabaseRepo:
                 chunk_uuid = uuid.UUID(chunk_id)
             except ValueError:
                 pass
+        thread_uuid = None
+        if thread_id:
+            try:
+                thread_uuid = uuid.UUID(thread_id)
+            except ValueError:
+                thread_uuid = None
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO notes (user_id, source_id, chunk_id, topic, content, created_at)
-                    VALUES (%s, %s, %s, %s, %s, now())
+                    INSERT INTO notes (user_id, source_id, chunk_id, topic, content, thread_id, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, now())
                     RETURNING id
                     """,
-                    (user_uuid, source_uuid, chunk_uuid, topic or None, content),
+                    (user_uuid, source_uuid, chunk_uuid, topic or None, content, thread_uuid),
                 )
                 row = cur.fetchone()
                 conn.commit()
@@ -2232,6 +2599,7 @@ class SupabaseRepo:
         user_id: str,
         status: Optional[str] = None,
         week_start: Optional[str] = None,
+        thread_id: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         """List keyword suggestions for a user."""
@@ -2241,7 +2609,7 @@ class SupabaseRepo:
                 q = """
                     SELECT id, keyword, parent_keyword, suggestion_type, reason,
                            confidence, status, responded_at, source_run_id,
-                           week_start, created_at
+                           week_start, thread_id, created_at
                     FROM keyword_suggestions
                     WHERE user_id = %s
                 """
@@ -2252,6 +2620,12 @@ class SupabaseRepo:
                 if week_start:
                     q += " AND week_start = %s"
                     params.append(week_start)
+                if thread_id:
+                    try:
+                        q += " AND thread_id = %s"
+                        params.append(uuid.UUID(thread_id))
+                    except ValueError:
+                        pass
                 q += " ORDER BY created_at DESC LIMIT %s"
                 params.append(limit)
                 cur.execute(q, params)
@@ -2263,6 +2637,8 @@ class SupabaseRepo:
                     d["id"] = str(d["id"])
                     if d.get("source_run_id") is not None:
                         d["source_run_id"] = str(d["source_run_id"])
+                    if d.get("thread_id") is not None:
+                        d["thread_id"] = str(d["thread_id"])
                     if d.get("week_start") is not None:
                         d["week_start"] = str(d["week_start"])
                     for ts_col in ("responded_at", "created_at"):
@@ -2277,6 +2653,7 @@ class SupabaseRepo:
         suggestions: List[Dict[str, Any]],
         week_start: str,
         source_run_id: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> List[str]:
         """Batch-insert keyword suggestions. Returns list of created ids."""
         user_uuid = self._get_or_create_user_id(user_id)
@@ -2286,6 +2663,12 @@ class SupabaseRepo:
                 run_uuid = uuid.UUID(source_run_id)
             except ValueError:
                 pass
+        thread_uuid = None
+        if thread_id:
+            try:
+                thread_uuid = uuid.UUID(thread_id)
+            except ValueError:
+                thread_uuid = None
         ids = []
         with self._get_connection() as conn:
             with conn.cursor() as cur:
@@ -2294,8 +2677,8 @@ class SupabaseRepo:
                         """
                         INSERT INTO keyword_suggestions
                             (user_id, keyword, parent_keyword, suggestion_type, reason,
-                             confidence, week_start, source_run_id)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                             confidence, week_start, source_run_id, thread_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id
                         """,
                         (
@@ -2307,6 +2690,7 @@ class SupabaseRepo:
                             s.get("confidence", 0.5),
                             week_start,
                             run_uuid,
+                            thread_uuid,
                         ),
                     )
                     row = cur.fetchone()
@@ -2315,12 +2699,14 @@ class SupabaseRepo:
         return ids
 
     def accept_keyword_suggestion(self, suggestion_id: str, user_id: str) -> Optional[str]:
-        """Accept a suggestion: update status, create user_keyword. Returns new keyword_id or None."""
+        """Accept a suggestion: update status, create user_keyword, link thread_keyword_weights. Returns keyword_id or None."""
         try:
             sug_uuid = uuid.UUID(suggestion_id)
         except ValueError:
             return None
         user_uuid = self._get_or_create_user_id(user_id)
+        kw_id_str: Optional[str] = None
+        junction_thread_uuid: Optional[uuid.UUID] = None
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2328,7 +2714,7 @@ class SupabaseRepo:
                     UPDATE keyword_suggestions
                     SET status = 'accepted', responded_at = now()
                     WHERE id = %s AND user_id = %s AND status = 'pending'
-                    RETURNING keyword, parent_keyword
+                    RETURNING keyword, parent_keyword, thread_id
                     """,
                     (sug_uuid, user_uuid),
                 )
@@ -2336,7 +2722,15 @@ class SupabaseRepo:
                 if not row:
                     conn.rollback()
                     return None
-                keyword, parent_keyword = row
+                keyword, parent_keyword, sug_thread_id = row[0], row[1], row[2]
+                junction_thread_uuid = sug_thread_id
+                if junction_thread_uuid is None:
+                    cur.execute(
+                        "SELECT id FROM interest_threads WHERE user_id = %s AND is_default = true LIMIT 1",
+                        (user_uuid,),
+                    )
+                    drow = cur.fetchone()
+                    junction_thread_uuid = drow[0] if drow else None
                 parent_kw_id = None
                 if parent_keyword:
                     cur.execute(
@@ -2366,8 +2760,25 @@ class SupabaseRepo:
                         (user_uuid, keyword, parent_kw_id),
                     )
                 kw_row = cur.fetchone()
+                if not kw_row:
+                    conn.rollback()
+                    return None
+                kw_id_str = str(kw_row[0])
+                if junction_thread_uuid is not None:
+                    cur.execute(
+                        """
+                        INSERT INTO thread_keyword_weights (thread_id, user_keyword_id, activation, weight_multiplier)
+                        VALUES (%s, %s, 1.0, 1.0)
+                        ON CONFLICT (thread_id, user_keyword_id)
+                        DO UPDATE SET
+                            activation = GREATEST(thread_keyword_weights.activation, EXCLUDED.activation),
+                            weight_multiplier = GREATEST(thread_keyword_weights.weight_multiplier, EXCLUDED.weight_multiplier),
+                            updated_at = now()
+                        """,
+                        (junction_thread_uuid, kw_row[0]),
+                    )
                 conn.commit()
-                return str(kw_row[0]) if kw_row else None
+        return kw_id_str
 
     def reject_keyword_suggestion(self, suggestion_id: str, user_id: str) -> bool:
         """Reject a suggestion. Returns True if updated."""

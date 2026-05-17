@@ -24,10 +24,11 @@ object RecommendationsRepository {
     suspend fun list(
         weekStart: String? = null,
         topicName: String? = null,
+        threadId: String? = null,
         limit: Int = 50
     ): ListResult = withContext(Dispatchers.IO) {
         try {
-            val response = api.list(weekStart = weekStart, topicName = topicName, limit = limit)
+            val response = api.list(weekStart = weekStart, topicName = topicName, threadId = threadId, limit = limit)
             if (response.isSuccessful) {
                 val body = response.body()
                 if (body != null) {
@@ -41,7 +42,8 @@ object RecommendationsRepository {
                             url = item.url,
                             source = item.source,
                             score = item.score,
-                            createdAt = item.createdAt
+                            createdAt = item.createdAt,
+                            threadId = item.threadId
                         )
                     }
                     ListResult.Success(items)

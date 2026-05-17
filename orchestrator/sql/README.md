@@ -29,6 +29,7 @@
    -- 7. Alpha memory/feedback 통합 스키마: 53_schema_alpha_feedback_memory.sql
    -- 8. feedback_events target 확장(rag_answer): 54_feedback_events_rag_answer.sql
    -- 9. feedback_events action 확장(process/remove): 55_feedback_events_action_process_remove.sql
+   -- 10. interest_threads + thread_keyword_weights + sources/notes/suggestions/recommendations.thread_id: 56_schema_interest_threads.sql
    ```
 
    또는 Supabase CLI를 사용하는 경우:

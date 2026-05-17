@@ -20,15 +20,17 @@ async def list_recommendations(
     user_id: Annotated[str, Depends(get_user_id)],
     week_start: str | None = Query(None, description="Filter by week_start (YYYY-MM-DD)"),
     topic_name: str | None = Query(None, description="Filter by topic_name"),
+    thread_id: str | None = Query(None, description="Filter by interest_threads id"),
     limit: int = Query(50, ge=1, le=100),
 ):
-    """Return recommendations for the current user (newest first). Optional week_start, topic_name filter."""
+    """Return recommendations for the current user (newest first). Optional filters."""
     repo = SupabaseRepo()
     items = await asyncio.to_thread(
         repo.list_recommendations,
         user_id,
         week_start=week_start,
         topic_name=topic_name,
+        thread_id=thread_id,
         limit=limit,
     )
     return {"recommendations": items}

@@ -12,7 +12,7 @@ Legacy: week_start strings that are Mondays (YYYY-MM-DD) still use UTC Monday 00
 """
 import logging
 from datetime import datetime, timezone, timedelta, time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import os
@@ -167,11 +167,13 @@ def run_s2_consolidation(
     week_start: Optional[str] = None,
     days: int = 7,
     now_utc: Optional[datetime] = None,
+    thread_id: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
-    Build one S2 summary for the user.
+    Build one S2 summary for the user for a single interest thread.
     - week_start omitted: ET Friday-aligned open week (see etf_week_start_key_when_payload_none).
     - week_start YYYY-MM-DD: if Monday (legacy), UTC Mon–Mon week; otherwise Friday ET start of window.
+    - thread_id: interest_threads.id; defaults to user's General thread when omitted.
     Returns (True, None) if S2 was created, (False, reason) if skipped.
     """
     repo = SupabaseRepo()
@@ -180,12 +182,16 @@ def run_s2_consolidation(
     norm_key, start_ts, end_ts, legacy_monday = _resolve_bounds(week_start, now_utc)
     week_start = norm_key
 
-    sources = repo.get_sources_for_user_between(user_id, start_ts, end_ts)
+    tid = thread_id or repo.get_or_create_default_thread_id(user_id)
+    if not repo.get_interest_thread(tid, user_id):
+        tid = repo.get_or_create_default_thread_id(user_id)
+
+    sources = repo.get_sources_for_user_between(user_id, start_ts, end_ts, thread_id=tid)
     window_desc = f"week {week_start}" + (" (legacy UTC Mon)" if legacy_monday else " (ET Fri)")
 
     if not sources:
-        reason = f"no sources in {window_desc}"
-        logger.info("s2 user_id=%s week_start=%s %s, skip", user_id, week_start, reason)
+        reason = f"no sources in {window_desc} for thread"
+        logger.info("s2 user_id=%s week_start=%s thread=%s %s, skip", user_id, week_start, tid, reason)
         return False, reason
 
     source_ids = [str(s["id"]) for s in sources]
@@ -214,11 +220,11 @@ def run_s2_consolidation(
     use_v2 = _s2_summary_version() == "v2"
 
     if use_v2:
-        summary = _run_s2_v2(repo, user_id, week_start, start_ts, combined_text)
+        summary = _run_s2_v2(repo, user_id, week_start, start_ts, combined_text, tid)
     else:
         summary = create_s2_summary(combined_text)
 
-    repo.delete_s2_for_user_week(user_id, week_start)
+    repo.delete_s2_for_user_week(user_id, week_start, tid)
     period_extra = _period_display_et(start_ts, end_ts)
 
     v2_extra = {}
@@ -227,37 +233,76 @@ def run_s2_consolidation(
             if summary.get(key) is not None:
                 v2_extra[key] = summary[key]
 
+    thread_row = repo.get_interest_thread(tid, user_id) or {}
+    topic_label = ((thread_row.get("name") or "") or "This Week").strip() or "This Week"
+
     repo.insert_summary_s2(
         user_id=user_id,
         week_start=week_start,
         tldr=summary["tldr"],
         bullets=summary["bullets"],
         source_ids=source_ids,
-        topic_name="This Week",
+        topic_name=topic_label,
         extra_meta={**get_s2_generation_meta(), **period_extra, **v2_extra},
+        thread_id=tid,
     )
     logger.info(
-        "s2 user_id=%s week_start=%s version=%s sections=%d bullets=%d",
-        user_id, week_start, _s2_summary_version(),
+        "s2 user_id=%s week_start=%s thread=%s version=%s sections=%d bullets=%d",
+        user_id, week_start, tid, _s2_summary_version(),
         len(summary.get("sections") or []), len(summary.get("bullets") or []),
     )
     return True, None
 
 
+def run_s2_consolidation_all_threads(
+    user_id: str,
+    week_start: Optional[str] = None,
+    days: int = 7,
+    now_utc: Optional[datetime] = None,
+) -> Tuple[bool, Optional[str]]:
+    """Run S2 once per non-archived interest thread. Returns (True, None) if any thread produced S2."""
+    repo = SupabaseRepo()
+    repo.get_or_create_default_thread_id(user_id)
+    threads = repo.list_interest_threads(user_id, include_archived=False)
+    any_ok = False
+    last_reason: Optional[str] = "no threads"
+    for t in threads:
+        tid = str(t["id"])
+        ok, reason = run_s2_consolidation(user_id, week_start, days, now_utc, thread_id=tid)
+        if ok:
+            any_ok = True
+        elif reason:
+            last_reason = reason
+    return any_ok, None if any_ok else last_reason
+
+
 def _run_s2_v2(
-    repo: SupabaseRepo, user_id: str, week_start: str, start_ts: datetime, s1_text: str,
+    repo: SupabaseRepo,
+    user_id: str,
+    week_start: str,
+    start_ts: datetime,
+    s1_text: str,
+    thread_id: str,
 ) -> Dict[str, Any]:
-    """Load personalization context and call create_s2_summary_v2."""
-    keywords = []
+    """Load personalization context and call create_s2_summary_v2 (thread-scoped keywords + notes)."""
+    from app.services.thread_effective_keywords import build_effective_keywords, parse_thread_weights
+
+    keywords: List[Dict[str, Any]] = []
     try:
-        keywords = repo.list_user_keywords(user_id, status="active")
+        global_kw = repo.list_user_keywords(user_id, status="active")
+        tw_rows = repo.list_thread_keyword_weights(thread_id, user_id)
+        keywords = build_effective_keywords(global_kw, parse_thread_weights(tw_rows))
     except Exception as e:
-        logger.warning("s2 v2: list_user_keywords failed (continuing): %s", e)
+        logger.warning("s2 v2: effective keywords failed (continuing): %s", e)
 
     notes_text = ""
     try:
         since_ts = datetime.now(timezone.utc) - timedelta(days=NOTES_DAYS)
-        notes_list = repo.list_notes_for_user(user_id, since_ts=since_ts, limit=NOTES_LIMIT, offset=0)
+        notes_list = repo.list_notes_for_user(
+            user_id, since_ts=since_ts, limit=NOTES_LIMIT, offset=0, thread_id=thread_id,
+        )
+        if not notes_list:
+            notes_list = repo.list_notes_for_user(user_id, since_ts=since_ts, limit=NOTES_LIMIT, offset=0)
         parts = []
         for n in notes_list:
             topic = (n.get("topic") or "").strip()
@@ -291,7 +336,7 @@ def _run_s2_v2(
     prev_s2_text = ""
     try:
         prev_key = (datetime.fromisoformat(week_start) - timedelta(days=7)).date().isoformat()
-        prev_s2 = repo.get_s2_for_user_week(user_id, prev_key)
+        prev_s2 = repo.get_s2_for_user_week(user_id, prev_key, thread_id=thread_id)
         if prev_s2:
             parts = []
             if prev_s2.get("tldr"):

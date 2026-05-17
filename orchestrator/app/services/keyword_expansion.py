@@ -78,18 +78,27 @@ def run_keyword_expansion(
     user_id: str,
     week_start: str,
     repo: Optional[SupabaseRepo] = None,
+    thread_id: Optional[str] = None,
 ) -> Tuple[List[str], Optional[str]]:
     """
-    Run Stage 1 keyword expansion for a user.
+    Run Stage 1 keyword expansion for a user (scoped to one interest thread).
     Returns (list of suggestion ids, error_message or None).
     """
+    from app.services.thread_effective_keywords import build_effective_keywords, parse_thread_weights
+
     repo = repo or SupabaseRepo()
+    tid = thread_id or repo.get_or_create_default_thread_id(user_id)
 
-    keywords = repo.list_user_keywords(user_id, status="active")
-    if not keywords:
+    global_kw = repo.list_user_keywords(user_id, status="active")
+    if not global_kw:
         return [], "no active keywords"
+    try:
+        tw_rows = repo.list_thread_keyword_weights(tid, user_id)
+        keywords = build_effective_keywords(global_kw, parse_thread_weights(tw_rows))
+    except Exception:
+        keywords = global_kw
 
-    s2_row = repo.get_s2_for_user_week(user_id, week_start)
+    s2_row = repo.get_s2_for_user_week(user_id, week_start, thread_id=tid)
     s2_text = ""
     if s2_row:
         parts = []
@@ -102,7 +111,11 @@ def run_keyword_expansion(
 
     since_ts = datetime.now(timezone.utc) - timedelta(days=NOTES_DAYS)
     try:
-        notes_list = repo.list_notes_for_user(user_id, since_ts=since_ts, limit=NOTES_LIMIT, offset=0)
+        notes_list = repo.list_notes_for_user(
+            user_id, since_ts=since_ts, limit=NOTES_LIMIT, offset=0, thread_id=tid,
+        )
+        if not notes_list:
+            notes_list = repo.list_notes_for_user(user_id, since_ts=since_ts, limit=NOTES_LIMIT, offset=0)
     except Exception:
         notes_list = []
     notes_text = "\n".join(
@@ -120,7 +133,11 @@ def run_keyword_expansion(
         week_start=week_start,
         stage="stage1",
         keyword_snapshot=keyword_snapshot,
-        meta={"prompt_version": "stage1-v2", "model": get_model("keyword_expansion")},
+        meta={
+            "prompt_version": "stage1-v2",
+            "model": get_model("keyword_expansion"),
+            "thread_id": tid,
+        },
     )
 
     try:
@@ -151,7 +168,7 @@ def run_keyword_expansion(
         else:
             return [], f"No JSON array in LLM response: {raw[:200]}"
 
-    existing_kw_lower = {k["keyword"].lower() for k in keywords}
+    existing_kw_lower = {k["keyword"].lower() for k in global_kw}
     rejected_lower = {r.lower() for r in rejected_recently}
     filtered = []
     for s in suggestions[:MAX_SUGGESTIONS_PER_WEEK]:
@@ -171,10 +188,11 @@ def run_keyword_expansion(
         suggestions=filtered,
         week_start=week_start,
         source_run_id=run_id,
+        thread_id=tid,
     )
 
     logger.info(
-        "stage1_keyword_expansion: user=%s week=%s suggestions=%d",
-        user_id, week_start, len(suggestion_ids),
+        "stage1_keyword_expansion: user=%s week=%s thread=%s suggestions=%d",
+        user_id, week_start, tid, len(suggestion_ids),
     )
     return suggestion_ids, None

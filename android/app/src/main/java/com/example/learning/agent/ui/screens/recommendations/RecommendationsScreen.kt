@@ -15,14 +15,18 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.example.learning.agent.data.models.Recommendation
 import com.example.learning.agent.data.remote.KeywordsApi
+import com.example.learning.agent.data.remote.ThreadsApi
 import com.example.learning.agent.data.repository.FeedbackRepository
 import com.example.learning.agent.data.repository.IngestRepository
 import com.example.learning.agent.data.repository.KeywordsRepository
 import com.example.learning.agent.data.repository.RecommendationsRepository
+import com.example.learning.agent.data.repository.ThreadPrefs
+import com.example.learning.agent.data.repository.ThreadsRepository
 import com.example.learning.agent.ui.components.AddKeywordDialog
 import com.example.learning.agent.ui.components.FeedbackBottomSheet
 import com.example.learning.agent.ui.components.KeywordProfileManageList
@@ -66,6 +70,16 @@ fun RecommendationsScreen(
 
     var showKeywordManageSheet by remember { mutableStateOf(false) }
     var showAddKeywordDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current.applicationContext
+    var threads by remember { mutableStateOf<List<ThreadsApi.InterestThreadItem>>(emptyList()) }
+    var selectedThreadId by remember { mutableStateOf<String?>(ThreadPrefs.getSelectedThreadId(context)) }
+    var threadMenuExpanded by remember { mutableStateOf(false) }
+    var showCreateThreadDialog by remember { mutableStateOf(false) }
+    var newThreadName by remember { mutableStateOf("") }
+    var newThreadDescription by remember { mutableStateOf("") }
+    var isCreatingThread by remember { mutableStateOf(false) }
+    var showArchiveConfirmDialog by remember { mutableStateOf(false) }
+    var isArchivingThread by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -133,6 +147,7 @@ fun RecommendationsScreen(
                 when (val r = RecommendationsRepository.list(
                     weekStart = weekStart,
                     topicName = null,
+                    threadId = selectedThreadId,
                     limit = 50
                 )) {
                     is RecommendationsRepository.ListResult.Success -> {
@@ -150,7 +165,21 @@ fun RecommendationsScreen(
         }
     }
 
-    LaunchedEffect(selectedWeek) {
+    suspend fun refreshThreads() {
+        when (val tr = ThreadsRepository.refreshSelection(context)) {
+            is ThreadsRepository.Result.Success -> {
+                threads = tr.threads
+                selectedThreadId = ThreadPrefs.getSelectedThreadId(context)
+            }
+            is ThreadsRepository.Result.Error -> { /* keep previous */ }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        refreshThreads()
+    }
+
+    LaunchedEffect(selectedWeek, selectedThreadId) {
         loadRecommendations()
     }
 
@@ -175,6 +204,51 @@ fun RecommendationsScreen(
                     .padding(paddingValues)
                     .padding(16.dp)
             ) {
+                if (threads.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ExposedDropdownMenuBox(
+                            expanded = threadMenuExpanded,
+                            onExpandedChange = { threadMenuExpanded = it },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            OutlinedTextField(
+                                value = threads.find { it.id == selectedThreadId }?.name ?: "Thread",
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text("Thread") },
+                                trailingIcon = {
+                                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = threadMenuExpanded)
+                                },
+                                modifier = Modifier.fillMaxWidth().menuAnchor()
+                            )
+                            ExposedDropdownMenu(
+                                expanded = threadMenuExpanded,
+                                onDismissRequest = { threadMenuExpanded = false }
+                            ) {
+                                threads.forEach { t ->
+                                    DropdownMenuItem(
+                                        text = { Text(t.name) },
+                                        onClick = {
+                                            selectedThreadId = t.id
+                                            ThreadPrefs.setSelectedThreadId(context, t.id)
+                                            threadMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        TextButton(onClick = { showCreateThreadDialog = true }) {
+                            Text("Manage")
+                        }
+                    }
+                }
+
                 var expandedWeek by remember { mutableStateOf(false) }
                 ExposedDropdownMenuBox(
                     expanded = expandedWeek,
@@ -388,7 +462,7 @@ fun RecommendationsScreen(
                                         processInProgress = rec.id
                                         scope.launch {
                                             trackRecommendationAction(rec, FeedbackRepository.ACTION_PROCESS)
-                                            when (val ingest = IngestRepository.ingestUrl(rec.url, rec.title)) {
+                                            when (val ingest = IngestRepository.ingestUrl(rec.url, rec.title, ThreadPrefs.getSelectedThreadId(context))) {
                                                 is IngestRepository.Result.Success -> {
                                                     val deleted = RecommendationsRepository.delete(rec.id)
                                                     if (deleted) {
@@ -427,6 +501,116 @@ fun RecommendationsScreen(
                 }
             }
         }
+    }
+
+    if (showCreateThreadDialog) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!isCreatingThread && !isArchivingThread) showCreateThreadDialog = false
+            },
+            title = { Text("Manage thread") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = newThreadName,
+                        onValueChange = { newThreadName = it },
+                        singleLine = true,
+                        label = { Text("New thread name") },
+                        enabled = !isCreatingThread
+                    )
+                    OutlinedTextField(
+                        value = newThreadDescription,
+                        onValueChange = { newThreadDescription = it },
+                        label = { Text("Description (optional)") },
+                        enabled = !isCreatingThread
+                    )
+                    FilledTonalButton(
+                        onClick = {
+                            scope.launch {
+                                isCreatingThread = true
+                                when (val result = ThreadsRepository.createThread(
+                                    context = context,
+                                    name = newThreadName,
+                                    description = newThreadDescription,
+                                    selectWhenCreated = true
+                                )) {
+                                    is ThreadsRepository.CreateResult.Success -> {
+                                        refreshThreads()
+                                        loadRecommendations()
+                                        newThreadName = ""
+                                        newThreadDescription = ""
+                                        snackbarHostState.showSnackbar("Created thread: ${result.thread.name}")
+                                    }
+                                    is ThreadsRepository.CreateResult.Error -> {
+                                        snackbarHostState.showSnackbar("Error: ${result.message}")
+                                    }
+                                }
+                                isCreatingThread = false
+                            }
+                        },
+                        enabled = !isCreatingThread && newThreadName.trim().isNotEmpty()
+                    ) {
+                        Text("Create thread")
+                    }
+
+                    val selected = threads.find { it.id == selectedThreadId }
+                    val canArchive = selected != null && !selected.isDefault
+                    OutlinedButton(
+                        onClick = { showArchiveConfirmDialog = true },
+                        enabled = canArchive && !isArchivingThread
+                    ) {
+                        Text(if (selected?.isDefault == true) "Default thread cannot be archived" else "Archive current thread")
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !isCreatingThread && !isArchivingThread,
+                    onClick = { showCreateThreadDialog = false }
+                ) { Text("Done") }
+            }
+        )
+    }
+
+    if (showArchiveConfirmDialog) {
+        val selected = threads.find { it.id == selectedThreadId }
+        AlertDialog(
+            onDismissRequest = {
+                if (!isArchivingThread) showArchiveConfirmDialog = false
+            },
+            title = { Text("Archive thread") },
+            text = { Text("Archive '${selected?.name ?: "this thread"}'? This hides it from active lists.") },
+            confirmButton = {
+                TextButton(
+                    enabled = selected != null && !isArchivingThread,
+                    onClick = {
+                        val thread = selected ?: return@TextButton
+                        scope.launch {
+                            isArchivingThread = true
+                            when (val result = ThreadsRepository.archiveThread(context, thread.id)) {
+                                is ThreadsRepository.ArchiveResult.Success -> {
+                                    refreshThreads()
+                                    loadRecommendations()
+                                    snackbarHostState.showSnackbar("Archived thread: ${thread.name}")
+                                    showArchiveConfirmDialog = false
+                                    showCreateThreadDialog = false
+                                }
+                                is ThreadsRepository.ArchiveResult.Error -> {
+                                    snackbarHostState.showSnackbar("Error: ${result.message}")
+                                }
+                            }
+                            isArchivingThread = false
+                        }
+                    }
+                ) { Text("Archive") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !isArchivingThread,
+                    onClick = { showArchiveConfirmDialog = false }
+                ) { Text("Cancel") }
+            }
+        )
     }
 
     if (showKeywordManageSheet) {

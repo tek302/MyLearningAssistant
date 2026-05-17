@@ -13,7 +13,8 @@ data class Recommendation(
     val url: String,
     val source: String,
     val score: Float?,
-    val createdAt: String?
+    val createdAt: String?,
+    val threadId: String? = null
 ) {
     /** Display date; falls back to week_start or empty. */
     val displayDate: String
