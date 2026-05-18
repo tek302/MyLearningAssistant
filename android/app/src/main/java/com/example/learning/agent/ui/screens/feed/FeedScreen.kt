@@ -14,8 +14,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.util.Log
@@ -47,6 +50,8 @@ private const val INGEST_POLL_FAST_COUNT = 12
 private const val INGEST_POLL_INTERVAL_MS = 2500L
 private const val INGEST_POLL_MAX_COUNT = 48
 private const val INGEST_POLL_TIMEOUT_MS = INGEST_POLL_FAST_COUNT * INGEST_POLL_INTERVAL_FAST_MS + (INGEST_POLL_MAX_COUNT - INGEST_POLL_FAST_COUNT) * INGEST_POLL_INTERVAL_MS + 10_000L // hard cap
+/** Min interval between GET /documents refreshes during ingest polling (DB is source of truth for card status). */
+private const val INGEST_FEED_REFRESH_THROTTLE_MS = 2_000L
 
 private const val TAG_FEED_INGEST = "FeedIngest"
 
@@ -88,28 +93,6 @@ fun FeedScreen(
     var isCreatingThread by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
-
-    val pdfPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetContent()
-    ) { uri: Uri? ->
-        uri ?: return@rememberLauncherForActivityResult
-        isIngesting = true
-        scope.launch {
-            when (val r = IngestRepository.ingestPdfFile(uri, context, threadId = selectedThreadId)) {
-                is IngestRepository.Result.Success -> {
-                    RefreshAndHighlightPrefs.setPendingIngestJobIdSync(context, r.jobId)
-                    lastIngestJobId = r.jobId
-                    snackbarHostState.showSnackbar(
-                        "Queued. Checking result…",
-                        withDismissAction = true
-                    )
-                }
-                is IngestRepository.Result.Error ->
-                    snackbarHostState.showSnackbar("Error: ${r.message}", withDismissAction = true)
-            }
-            isIngesting = false
-        }
-    }
 
     suspend fun applyNewDocumentList(newList: List<DocumentsApi.DocumentItem>) {
         val known = RefreshAndHighlightPrefs.getKnownDocumentIds(context)
@@ -220,26 +203,76 @@ fun FeedScreen(
         }
     }
 
+    /** Reload first page from DB; card status (pending/running/done) always comes from the server. */
+    suspend fun syncDocumentsFirstPage(showErrorSnackbar: Boolean = true) {
+        when (val r = DocumentsRepository.getDocuments(
+            limit = PAGE_SIZE,
+            offset = 0,
+            includeSummary = true,
+            threadId = selectedThreadId,
+        )) {
+            is DocumentsRepository.Result.Success -> {
+                documents = r.documents
+                loadMoreEnabled = r.documents.size >= PAGE_SIZE
+                DocumentsCache.saveCachedDocuments(context, r.documents)
+                applyNewDocumentList(r.documents)
+                notifyFailedDocumentsFromList(r.documents)
+            }
+            is DocumentsRepository.Result.Error -> {
+                loadError = r.message
+                if (showErrorSnackbar) {
+                    snackbarHostState.showSnackbar("Error: ${r.message}")
+                }
+            }
+        }
+    }
+
     fun doRefresh(onDone: (() -> Unit)? = null) {
         if (isRefreshing) return
         scope.launch {
             isRefreshing = true
             loadError = null
-            when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = true, threadId = selectedThreadId)) {
-                is DocumentsRepository.Result.Success -> {
-                    documents = r.documents
-                    loadMoreEnabled = r.documents.size >= PAGE_SIZE
-                    DocumentsCache.saveCachedDocuments(context, r.documents)
-                    applyNewDocumentList(r.documents)
-                    notifyFailedDocumentsFromList(r.documents)
-                }
-                is DocumentsRepository.Result.Error -> {
-                    loadError = r.message
-                    snackbarHostState.showSnackbar("Error: ${r.message}")
-                }
-            }
+            syncDocumentsFirstPage()
             isRefreshing = false
             onDone?.invoke()
+        }
+    }
+
+    /** After headless Share or returning to the app: pick up refresh hint / pending jobs and sync from DB. */
+    suspend fun applyShareAndPendingHintsFromPrefs() {
+        var synced = false
+        if (RefreshAndHighlightPrefs.shouldRefreshFromShare(context)) {
+            RefreshAndHighlightPrefs.clearRefreshFromShareAt(context)
+            syncDocumentsFirstPage()
+            synced = true
+        }
+        val pendingIds = RefreshAndHighlightPrefs.getPendingIngestJobIds(context)
+        if (pendingIds.isNotEmpty()) {
+            if (lastIngestJobId == null) lastIngestJobId = pendingIds.first()
+            if (!synced) syncDocumentsFirstPage()
+        }
+    }
+
+    val pdfPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri ?: return@rememberLauncherForActivityResult
+        isIngesting = true
+        scope.launch {
+            when (val r = IngestRepository.ingestPdfFile(uri, context, threadId = selectedThreadId)) {
+                is IngestRepository.Result.Success -> {
+                    RefreshAndHighlightPrefs.setPendingIngestJobIdSync(context, r.jobId)
+                    lastIngestJobId = r.jobId
+                    syncDocumentsFirstPage()
+                    snackbarHostState.showSnackbar(
+                        "Queued. Checking result…",
+                        withDismissAction = true
+                    )
+                }
+                is IngestRepository.Result.Error ->
+                    snackbarHostState.showSnackbar("Error: ${r.message}", withDismissAction = true)
+            }
+            isIngesting = false
         }
     }
 
@@ -308,51 +341,67 @@ fun FeedScreen(
     }
 
     LaunchedEffect(Unit) {
+        // Show cached cards immediately (before any network); thread list sync runs next.
+        val cached = DocumentsCache.getCachedDocuments(context)
+        val hadCache = !cached.isNullOrEmpty()
+        if (hadCache) {
+            documents = cached
+            loadMoreEnabled = cached.size >= PAGE_SIZE
+            notifyFailedDocumentsFromList(cached)
+        }
         refreshThreads()
         val shouldRefresh = RefreshAndHighlightPrefs.shouldRefreshFromShare(context)
         highlightedDocumentIds = RefreshAndHighlightPrefs.getHighlightedDocumentIds(context)
         if (shouldRefresh) {
             RefreshAndHighlightPrefs.clearRefreshFromShareAt(context)
             loadPage(0, append = false)
-        } else {
-            val cached = DocumentsCache.getCachedDocuments(context)
-            if (!cached.isNullOrEmpty()) {
-                documents = cached
-                loadMoreEnabled = cached.size >= PAGE_SIZE
-                notifyFailedDocumentsFromList(cached)
-                // Quick sync check: compare server first-page ids with cache; if different, refresh feed (BE 수정 없이 include_summary=false 활용).
-                when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = false, threadId = selectedThreadId)) {
-                    is DocumentsRepository.Result.Success -> {
-                        val serverIds = r.documents.map { it.id }.toSet()
-                        val cachedFirstIds = cached.take(PAGE_SIZE).map { it.id }.toSet()
-                        if (serverIds != cachedFirstIds) {
-                            when (val r2 = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = true, threadId = selectedThreadId)) {
-                                is DocumentsRepository.Result.Success -> {
-                                    documents = r2.documents
-                                    loadMoreEnabled = r2.documents.size >= PAGE_SIZE
-                                    DocumentsCache.saveCachedDocuments(context, r2.documents)
-                                    applyNewDocumentList(r2.documents)
-                                    notifyFailedDocumentsFromList(r2.documents)
-                                }
-                                is DocumentsRepository.Result.Error -> {
-                                    loadError = r2.message
-                                    snackbarHostState.showSnackbar("Error: ${r2.message}")
-                                }
+        } else if (hadCache) {
+            // Quick sync: compare server first-page ids with cache; refresh if different.
+            when (val r = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = false, threadId = selectedThreadId)) {
+                is DocumentsRepository.Result.Success -> {
+                    val serverIds = r.documents.map { it.id }.toSet()
+                    val cachedFirstIds = cached.take(PAGE_SIZE).map { it.id }.toSet()
+                    if (serverIds != cachedFirstIds) {
+                        when (val r2 = DocumentsRepository.getDocuments(limit = PAGE_SIZE, offset = 0, includeSummary = true, threadId = selectedThreadId)) {
+                            is DocumentsRepository.Result.Success -> {
+                                documents = r2.documents
+                                loadMoreEnabled = r2.documents.size >= PAGE_SIZE
+                                DocumentsCache.saveCachedDocuments(context, r2.documents)
+                                applyNewDocumentList(r2.documents)
+                                notifyFailedDocumentsFromList(r2.documents)
+                            }
+                            is DocumentsRepository.Result.Error -> {
+                                loadError = r2.message
+                                snackbarHostState.showSnackbar("Error: ${r2.message}")
                             }
                         }
                     }
-                    is DocumentsRepository.Result.Error -> { /* keep cache on light-check failure */ }
                 }
-            } else {
-                loadPage(0, append = false)
+                is DocumentsRepository.Result.Error -> { /* keep cache on light-check failure */ }
             }
+        } else {
+            loadPage(0, append = false)
         }
         // Restore pending ingest from Share (or previous Feed Send) so we poll and show result even if user left Feed
         val pendingIds = RefreshAndHighlightPrefs.getPendingIngestJobIds(context)
-        if (pendingIds.isNotEmpty()) lastIngestJobId = pendingIds.first()
+        if (pendingIds.isNotEmpty()) {
+            lastIngestJobId = pendingIds.first()
+            if (!shouldRefresh) syncDocumentsFirstPage()
+        }
         if (BuildConfig.DEBUG && pendingIds.isNotEmpty()) {
             Log.d(TAG_FEED_INGEST, "restored pending=${pendingIds.size} ids=${pendingIds.take(3).joinToString(",")}${if (pendingIds.size > 3) "..." else ""}, lastIngestJobId=${pendingIds.first()}")
         }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                scope.launch { applyShareAndPendingHintsFromPrefs() }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // When MainScreen requests feed refresh (e.g. after ingest failure OK → delete), run doRefresh and signal done.
@@ -386,26 +435,31 @@ fun FeedScreen(
     LaunchedEffect(lastIngestJobId) {
         val jobId = lastIngestJobId ?: return@LaunchedEffect
         if (BuildConfig.DEBUG) Log.d(TAG_FEED_INGEST, "polling jobId=$jobId")
+        var lastDocRefreshAt = 0L
+        suspend fun maybeRefreshFromDb() {
+            val now = System.currentTimeMillis()
+            if (now - lastDocRefreshAt < INGEST_FEED_REFRESH_THROTTLE_MS) return
+            lastDocRefreshAt = now
+            syncDocumentsFirstPage(showErrorSnackbar = false)
+        }
         try {
             withTimeout(INGEST_POLL_TIMEOUT_MS) {
                 var count = 0
                 while (count < INGEST_POLL_MAX_COUNT) {
-                    val intervalMs = if (count < INGEST_POLL_FAST_COUNT) INGEST_POLL_INTERVAL_FAST_MS else INGEST_POLL_INTERVAL_MS
-                    kotlinx.coroutines.delay(intervalMs)
-                    count++
                     when (val r = IngestRepository.getStatus(jobId)) {
                         is IngestRepository.StatusResponse.Ok -> {
                             when (r.status.state) {
                                 "done" -> {
                                     RefreshAndHighlightPrefs.removePendingIngestJobIdSync(context, jobId)
                                     OnboardingPrefs.markFirstIngestCompletedSync(context)
-                                    loadPage(0, append = false)
+                                    syncDocumentsFirstPage()
                                     snackbarHostState.showSnackbar("Added to your documents", withDismissAction = true)
                                     pendingClearPollingJobId = jobId
                                     return@withTimeout
                                 }
                                 "failed" -> {
                                     RefreshAndHighlightPrefs.removePendingIngestJobIdSync(context, jobId)
+                                    syncDocumentsFirstPage(showErrorSnackbar = false)
                                     addIngestFailure(
                                         IngestFailureInfo(
                                             message = shortIngestFailureMessage(
@@ -423,7 +477,7 @@ fun FeedScreen(
                                     pendingClearPollingJobId = jobId
                                     return@withTimeout
                                 }
-                                else -> { /* queued/running, keep polling */ }
+                                else -> maybeRefreshFromDb()
                             }
                         }
                         is IngestRepository.StatusResponse.Err -> {
@@ -434,6 +488,14 @@ fun FeedScreen(
                             return@withTimeout
                         }
                     }
+                    count++
+                    if (count >= INGEST_POLL_MAX_COUNT) break
+                    val intervalMs = if (count < INGEST_POLL_FAST_COUNT) {
+                        INGEST_POLL_INTERVAL_FAST_MS
+                    } else {
+                        INGEST_POLL_INTERVAL_MS
+                    }
+                    kotlinx.coroutines.delay(intervalMs)
                 }
                 RefreshAndHighlightPrefs.removePendingIngestJobIdSync(context, jobId)
                 snackbarHostState.showSnackbar("Ingest is still processing. Refresh the list later.", withDismissAction = true)
@@ -544,6 +606,7 @@ fun FeedScreen(
                                     urlText = ""
                                     RefreshAndHighlightPrefs.setPendingIngestJobIdSync(context, r.jobId)
                                     lastIngestJobId = r.jobId
+                                    syncDocumentsFirstPage()
                                     snackbarHostState.showSnackbar(
                                         "Queued. Checking result…",
                                         withDismissAction = true

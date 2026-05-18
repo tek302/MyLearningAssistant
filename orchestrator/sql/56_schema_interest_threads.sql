@@ -84,7 +84,7 @@ where sm.user_id = t.user_id
   and sm.scope = 'topic'
   and sm.kind = 'S2'
   and t.is_default = true
-  and (sm.extra->>'thread_id' is null or trim(sm.extra->>>'thread_id') = '');
+  and (sm.extra->>'thread_id' is null or trim(sm.extra->>'thread_id') = '');
 
 update public.recommendations r
 set thread_id = t.id
